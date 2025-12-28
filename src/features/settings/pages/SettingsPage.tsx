@@ -186,31 +186,6 @@ export default function SettingsPage() {
           </div>
         </CardContent>
       </Card>
-
-      {/* Workspace Section */}
-      <Card className="border-border/50 shadow-soft">
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            <Heart className="h-5 w-5" />
-            Workspace
-          </CardTitle>
-          <CardDescription>Manage your shared workspace</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <div className="flex items-center gap-4 p-4 rounded-lg bg-muted/50">
-            <div className="h-12 w-12 rounded-full bg-primary/10 flex items-center justify-center">
-              <Heart className="h-6 w-6 text-primary" />
-            </div>
-            <div className="flex-1">
-              <p className="font-medium">Our Shared Planner</p>
-              <p className="text-sm text-muted-foreground">2 members</p>
-            </div>
-            <Button variant="outline" size="sm">
-              Invite Partner
-            </Button>
-          </div>
-        </CardContent>
-      </Card>
     </div>
   );
 }
