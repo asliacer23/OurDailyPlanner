@@ -151,7 +151,7 @@ export function Sidebar({ open, onClose }: SidebarProps) {
               </div>
               <div className="flex-1 min-w-0">
                 <p className="text-xs font-medium truncate">Together since</p>
-                <p className="text-xs text-muted-foreground">2024</p>
+                <p className="text-xs text-muted-foreground">2025</p>
               </div>
             </div>
           </div>

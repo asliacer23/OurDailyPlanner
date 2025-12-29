@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Plus, Plane, MapPin, Calendar, DollarSign, Trash2 } from 'lucide-react';
+import { Plus, Plane, MapPin, Calendar, Trash2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
@@ -311,7 +311,7 @@ export default function TravelPage() {
                     </div>
                     {plan.budget && (
                       <div className="flex items-center gap-2">
-                        <DollarSign className="h-3.5 w-3.5" />
+                        <span>₱</span>
                         Budget: {formatPeso(plan.budget)}
                       </div>
                     )}

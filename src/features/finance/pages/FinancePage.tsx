@@ -3,7 +3,6 @@ import {
   Plus,
   TrendingUp,
   TrendingDown,
-  DollarSign,
   PiggyBank,
   ArrowUpRight,
   ArrowDownRight,
@@ -498,7 +497,7 @@ export default function FinancePage() {
             <CardTitle className="text-sm font-medium text-muted-foreground">
               Net Balance
             </CardTitle>
-            <DollarSign className="h-4 w-4 text-primary" />
+            <span className="text-primary font-bold">₱</span>
           </CardHeader>
           <CardContent>
             <div

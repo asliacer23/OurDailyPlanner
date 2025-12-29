@@ -7,6 +7,7 @@ import { useAuth } from '@/features/auth/hooks/useAuth';
 import { supabase } from '@/integrations/supabase/client';
 import { useNavigate } from 'react-router-dom';
 import { cn } from '@/lib/utils';
+import { formatPeso } from '@/lib/currency';
 import { PhotoCarousel } from '@/components/home/PhotoCarousel';
 import { TipsWidget } from '@/components/home/TipsWidget';
 import { QuickNotesWidget } from '@/components/home/QuickNotesWidget';
@@ -140,7 +141,7 @@ export default function DashboardPage() {
                 <TrendingUp className="h-5 w-5 text-success" />
               </div>
               <div>
-                <p className="text-lg font-bold font-display text-success">${stats.revenues.toLocaleString()}</p>
+                <p className="text-lg font-bold font-display text-success">{formatPeso(stats.revenues)}</p>
                 <p className="text-xs text-muted-foreground">Revenue</p>
               </div>
             </div>
@@ -154,7 +155,7 @@ export default function DashboardPage() {
                 <Wallet className="h-5 w-5 text-destructive" />
               </div>
               <div>
-                <p className="text-lg font-bold font-display text-destructive">${stats.expenses.toLocaleString()}</p>
+                <p className="text-lg font-bold font-display text-destructive">{formatPeso(stats.expenses)}</p>
                 <p className="text-xs text-muted-foreground">Expenses</p>
               </div>
             </div>
