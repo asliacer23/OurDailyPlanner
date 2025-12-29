@@ -216,7 +216,7 @@ export default function MoviesPage() {
     setDialogOpen(true);
   };
 
-  const filteredMovies = movies.filter(m => {
+  const filteredMovies = (movies || []).filter(m => {
     if (activeTab === 'watchlist') return !m.is_watched;
     if (activeTab === 'watched') return m.is_watched;
     return true;
@@ -288,9 +288,9 @@ export default function MoviesPage() {
 
       <Tabs value={activeTab} onValueChange={setActiveTab}>
         <TabsList>
-          <TabsTrigger value="all">All ({movies.length})</TabsTrigger>
-          <TabsTrigger value="watchlist">Watchlist ({movies.filter(m => !m.is_watched).length})</TabsTrigger>
-          <TabsTrigger value="watched">Watched ({movies.filter(m => m.is_watched).length})</TabsTrigger>
+          <TabsTrigger value="all">All ({movies?.length ?? 0})</TabsTrigger>
+          <TabsTrigger value="watchlist">Watchlist ({movies?.filter(m => !m.is_watched)?.length ?? 0})</TabsTrigger>
+          <TabsTrigger value="watched">Watched ({movies?.filter(m => m.is_watched)?.length ?? 0})</TabsTrigger>
         </TabsList>
 
         <TabsContent value={activeTab} className="mt-4">
