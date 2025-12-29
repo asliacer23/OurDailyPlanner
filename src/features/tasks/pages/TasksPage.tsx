@@ -11,6 +11,8 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { supabase } from '@/integrations/supabase/client';
 import { useAuth } from '@/features/auth/hooks/useAuth';
+import { useEditRequests } from '@/hooks/useEditRequests';
+import { EditConfirmationDialog } from '@/components/shared/EditConfirmationDialog';
 import { toast } from 'sonner';
 import { format } from 'date-fns';
 import { cn } from '@/lib/utils';
@@ -33,12 +35,14 @@ interface Task {
 
 export default function TasksPage() {
   const { user, workspace } = useAuth();
+  const { pendingEdits, requestEdit, approveEdit, rejectEdit } = useEditRequests(workspace?.id || null);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [loading, setLoading] = useState(true);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editingTask, setEditingTask] = useState<Task | null>(null);
   const [viewingTask, setViewingTask] = useState<Task | null>(null);
   const [activeTab, setActiveTab] = useState('all');
+  const [showPendingEdit, setShowPendingEdit] = useState(false);
   const [newTask, setNewTask] = useState<{
     title: string;
     description: string;
@@ -104,20 +108,30 @@ export default function TasksPage() {
   const handleUpdate = async () => {
     if (!editingTask) return;
     try {
-      const { error } = await supabase
-        .from('tasks')
-        .update({
-          title: newTask.title,
-          description: newTask.description || null,
-          status: newTask.status,
-          priority: newTask.priority,
-          due_date: newTask.due_date || null,
-          visibility: newTask.visibility,
-        })
-        .eq('id', editingTask.id);
+      const newData = {
+        title: newTask.title,
+        description: newTask.description || null,
+        status: newTask.status,
+        priority: newTask.priority,
+        due_date: newTask.due_date || null,
+        visibility: newTask.visibility,
+      };
 
-      if (error) throw error;
-      toast.success('Task updated!');
+      // If user is the author, update directly
+      if (editingTask.author_id === user?.id) {
+        const { error } = await supabase
+          .from('tasks')
+          .update(newData)
+          .eq('id', editingTask.id);
+
+        if (error) throw error;
+        toast.success('Task updated!');
+      } else {
+        // Request approval from author
+        await requestEdit('task', editingTask.id, 'edit', newData, `Updated task: "${newTask.title}"`);
+        toast.success('Edit request sent to task owner for approval');
+      }
+      
       resetForm();
       fetchTasks();
     } catch (error) {
@@ -126,10 +140,22 @@ export default function TasksPage() {
   };
 
   const handleDelete = async (id: string) => {
+    if (!user?.id) return;
+    const taskToDelete = tasks.find(t => t.id === id);
+    if (!taskToDelete) return;
+
     try {
-      const { error } = await supabase.from('tasks').delete().eq('id', id);
-      if (error) throw error;
-      toast.success('Task deleted');
+      // If user is the author, delete directly
+      if (taskToDelete.author_id === user.id) {
+        const { error } = await supabase.from('tasks').delete().eq('id', id);
+        if (error) throw error;
+        toast.success('Task deleted');
+      } else {
+        // Request deletion approval from author
+        await requestEdit('task', id, 'delete', null, 'Requested to delete this task');
+        toast.success('Delete request sent to task owner for approval');
+      }
+      
       setViewingTask(null);
       fetchTasks();
     } catch (error) {
@@ -348,6 +374,44 @@ export default function TasksPage() {
           )}
         </div>
       </ViewModal>
+
+      {pendingEdits.filter(e => e.content_type === 'task' && e.approver_id === user?.id).length > 0 && (
+        <>
+          {pendingEdits.filter(e => e.content_type === 'task' && e.approver_id === user?.id).map(edit => (
+            <EditConfirmationDialog
+              key={edit.id}
+              isOpen={showPendingEdit && pendingEdits.some(e => e.content_type === 'task' && e.approver_id === user?.id && e.id === edit.id)}
+              requesterName={edit.requester?.display_name || 'Unknown'}
+              contentType="task"
+              action={edit.action as 'edit' | 'delete'}
+              originalData={edit.original_data}
+              newData={edit.new_data}
+              changeDescription={edit.change_description}
+              onApprove={async (editId) => {
+                await approveEdit(editId);
+                setShowPendingEdit(false);
+                fetchTasks();
+              }}
+              onReject={async (editId) => {
+                await rejectEdit(editId);
+                setShowPendingEdit(false);
+              }}
+              onClose={() => setShowPendingEdit(false)}
+              editId={edit.id}
+            />
+          ))}
+          {!showPendingEdit && pendingEdits.some(e => e.content_type === 'task' && e.approver_id === user?.id) && (
+            <Button
+              variant="outline"
+              className="fixed bottom-24 right-4 gap-2"
+              onClick={() => setShowPendingEdit(true)}
+            >
+              {pendingEdits.filter(e => e.content_type === 'task' && e.approver_id === user?.id).length} Pending Approval
+            </Button>
+          )}
+        </>
+      )}
     </div>
   );
 }
+

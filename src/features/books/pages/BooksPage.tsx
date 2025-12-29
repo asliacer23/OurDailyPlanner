@@ -11,6 +11,8 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { supabase } from '@/integrations/supabase/client';
 import { useAuth } from '@/features/auth/hooks/useAuth';
+import { useEditRequests } from '@/hooks/useEditRequests';
+import { EditConfirmationDialog } from '@/components/shared/EditConfirmationDialog';
 import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
 import { ViewModal } from '@/components/shared/ViewModal';
@@ -34,12 +36,14 @@ const GENRES = ['Fiction', 'Non-Fiction', 'Mystery', 'Romance', 'Sci-Fi', 'Fanta
 
 export default function BooksPage() {
   const { user, workspace } = useAuth();
+  const { pendingEdits, requestEdit, approveEdit, rejectEdit } = useEditRequests(workspace?.id || null);
   const [books, setBooks] = useState<Book[]>([]);
   const [loading, setLoading] = useState(true);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editingBook, setEditingBook] = useState<Book | null>(null);
   const [viewingBook, setViewingBook] = useState<Book | null>(null);
   const [activeTab, setActiveTab] = useState('all');
+  const [showPendingEdit, setShowPendingEdit] = useState(false);
   const [newBook, setNewBook] = useState<{
     title: string;
     book_author: string;
@@ -111,21 +115,31 @@ export default function BooksPage() {
   const handleUpdate = async () => {
     if (!editingBook) return;
     try {
-      const { error } = await supabase
-        .from('books_read_list')
-        .update({
-          title: newBook.title,
-          book_author: newBook.book_author || null,
-          genre: newBook.genre || null,
-          rating: newBook.rating ? parseInt(newBook.rating) : null,
-          is_read: newBook.is_read,
-          notes: newBook.notes || null,
-          visibility: newBook.visibility,
-        })
-        .eq('id', editingBook.id);
+      const newData = {
+        title: newBook.title,
+        book_author: newBook.book_author || null,
+        genre: newBook.genre || null,
+        rating: newBook.rating ? parseInt(newBook.rating) : null,
+        is_read: newBook.is_read,
+        notes: newBook.notes || null,
+        visibility: newBook.visibility,
+      };
 
-      if (error) throw error;
-      toast.success('Book updated!');
+      // If user is the author, update directly
+      if (editingBook.author_id === user?.id) {
+        const { error } = await supabase
+          .from('books_read_list')
+          .update(newData)
+          .eq('id', editingBook.id);
+
+        if (error) throw error;
+        toast.success('Book updated!');
+      } else {
+        // Request approval from author
+        await requestEdit('book', editingBook.id, 'edit', newData, `Updated book: "${newBook.title}"`);
+        toast.success('Edit request sent to book owner for approval');
+      }
+      
       resetForm();
       fetchBooks();
     } catch (error) {
@@ -134,10 +148,22 @@ export default function BooksPage() {
   };
 
   const handleDelete = async (id: string) => {
+    if (!user?.id) return;
+    const bookToDelete = books.find(b => b.id === id);
+    if (!bookToDelete) return;
+
     try {
-      const { error } = await supabase.from('books_read_list').delete().eq('id', id);
-      if (error) throw error;
-      toast.success('Book removed');
+      // If user is the author, delete directly
+      if (bookToDelete.author_id === user.id) {
+        const { error } = await supabase.from('books_read_list').delete().eq('id', id);
+        if (error) throw error;
+        toast.success('Book removed');
+      } else {
+        // Request deletion approval from author
+        await requestEdit('book', id, 'delete', null, 'Requested to delete this book');
+        toast.success('Delete request sent to book owner for approval');
+      }
+      
       setViewingBook(null);
       fetchBooks();
     } catch (error) {
@@ -360,6 +386,44 @@ export default function BooksPage() {
           {viewingBook?.notes && <p className="text-muted-foreground">{viewingBook.notes}</p>}
         </div>
       </ViewModal>
+
+      {pendingEdits.filter(e => e.content_type === 'book' && e.approver_id === user?.id).length > 0 && (
+        <>
+          {pendingEdits.filter(e => e.content_type === 'book' && e.approver_id === user?.id).map(edit => (
+            <EditConfirmationDialog
+              key={edit.id}
+              isOpen={showPendingEdit && pendingEdits.some(e => e.content_type === 'book' && e.approver_id === user?.id && e.id === edit.id)}
+              requesterName={edit.requester?.display_name || 'Unknown'}
+              contentType="book"
+              action={edit.action as 'edit' | 'delete'}
+              originalData={edit.original_data}
+              newData={edit.new_data}
+              changeDescription={edit.change_description}
+              onApprove={async (editId) => {
+                await approveEdit(editId);
+                setShowPendingEdit(false);
+                fetchBooks();
+              }}
+              onReject={async (editId) => {
+                await rejectEdit(editId);
+                setShowPendingEdit(false);
+              }}
+              onClose={() => setShowPendingEdit(false)}
+              editId={edit.id}
+            />
+          ))}
+          {!showPendingEdit && pendingEdits.some(e => e.content_type === 'book' && e.approver_id === user?.id) && (
+            <Button
+              variant="outline"
+              className="fixed bottom-24 right-4 gap-2"
+              onClick={() => setShowPendingEdit(true)}
+            >
+              {pendingEdits.filter(e => e.content_type === 'book' && e.approver_id === user?.id).length} Pending Approval
+            </Button>
+          )}
+        </>
+      )}
     </div>
   );
 }
+

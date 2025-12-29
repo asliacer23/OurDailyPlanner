@@ -14,6 +14,10 @@ import { Badge } from '@/components/ui/badge';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { supabase } from '@/integrations/supabase/client';
 import { useAuth } from '@/features/auth/hooks/useAuth';
+import { useEditRequests } from '@/hooks/useEditRequests';
+import { EditConfirmationDialog } from '@/components/shared/EditConfirmationDialog';
+import { AuthorBadge } from '@/components/shared/AuthorBadge';
+import { ViewModal } from '@/components/shared/ViewModal';
 import { toast } from 'sonner';
 
 interface Event {
@@ -26,6 +30,14 @@ interface Event {
   color: string;
   visibility: 'private' | 'shared' | 'business';
   author_id: string;
+  author?: Profile;
+  created_at?: string;
+}
+
+interface Profile {
+  id: string;
+  display_name: string | null;
+  avatar_url: string | null;
 }
 
 const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
@@ -40,12 +52,15 @@ const EVENT_COLORS = [
 
 export default function CalendarPage() {
   const { user, workspace } = useAuth();
+  const { pendingEdits, requestEdit, approveEdit, rejectEdit } = useEditRequests(workspace?.id || null);
   const [currentDate, setCurrentDate] = useState(new Date());
   const [selectedDate, setSelectedDate] = useState<Date | null>(null);
   const [events, setEvents] = useState<Event[]>([]);
+  const [viewingEvent, setViewingEvent] = useState<Event | null>(null);
   const [loading, setLoading] = useState(true);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editingEvent, setEditingEvent] = useState<Event | null>(null);
+  const [showPendingEdit, setShowPendingEdit] = useState(false);
   
   const [newEvent, setNewEvent] = useState<{
     title: string;
@@ -145,35 +160,78 @@ export default function CalendarPage() {
   const handleUpdateEvent = async () => {
     if (!editingEvent || !user?.id) return;
 
-    try {
-      const { error } = await supabase
-        .from('events')
-        .update({
+    // Check if editing own event
+    if (editingEvent.author_id === user.id) {
+      // Direct update - author can always edit own events
+      try {
+        const { error } = await supabase
+          .from('events')
+          .update({
+            title: newEvent.title,
+            description: newEvent.description || null,
+            color: newEvent.color,
+            visibility: newEvent.visibility,
+          })
+          .eq('id', editingEvent.id);
+
+        if (error) throw error;
+        
+        toast.success('Event updated!');
+        resetForm();
+        fetchEvents();
+      } catch (error) {
+        toast.error('Failed to update event');
+      }
+    } else {
+      // Request approval from partner
+      const editId = await requestEdit(
+        'event',
+        editingEvent.id,
+        'edit',
+        { 
           title: newEvent.title,
           description: newEvent.description || null,
           color: newEvent.color,
-          visibility: newEvent.visibility,
-        })
-        .eq('id', editingEvent.id);
+          visibility: newEvent.visibility
+        },
+        `Updated event: "${editingEvent.title}" → "${newEvent.title}"`
+      );
 
-      if (error) throw error;
-      
-      toast.success('Event updated!');
-      resetForm();
-      fetchEvents();
-    } catch (error) {
-      toast.error('Failed to update event');
+      if (editId) {
+        toast.info('Approval request sent to your partner');
+        resetForm();
+      }
     }
   };
 
   const handleDeleteEvent = async (eventId: string) => {
-    try {
-      const { error } = await supabase.from('events').delete().eq('id', eventId);
-      if (error) throw error;
-      toast.success('Event deleted');
-      fetchEvents();
-    } catch (error) {
-      toast.error('Failed to delete event');
+    const eventToDelete = events.find(e => e.id === eventId);
+    if (!eventToDelete) return;
+
+    // Check if deleting own event
+    if (eventToDelete.author_id === user?.id) {
+      // Direct delete - author can always delete own events
+      try {
+        const { error } = await supabase.from('events').delete().eq('id', eventId);
+        if (error) throw error;
+        toast.success('Event deleted');
+        fetchEvents();
+      } catch (error: any) {
+        toast.error('Failed to delete event');
+      }
+    } else {
+      // Request approval from partner
+      const editId = await requestEdit(
+        'event',
+        eventId,
+        'delete',
+        null,
+        `Requested deletion of event: "${eventToDelete.title}"`
+      );
+
+      if (editId) {
+        toast.info('Delete request sent to your partner');
+      }
     }
   };
 
@@ -448,7 +506,8 @@ export default function CalendarPage() {
                   {selectedDayEvents.map((event) => (
                     <div
                       key={event.id}
-                      className="p-3 rounded-lg border border-border/50 hover:bg-accent/50 transition-colors group"
+                      className="p-3 rounded-lg border border-border/50 hover:bg-accent/50 transition-colors group cursor-pointer"
+                      onClick={() => setViewingEvent(event)}
                     >
                       <div className="flex items-start justify-between gap-2">
                         <div className="flex items-start gap-2">
@@ -500,6 +559,74 @@ export default function CalendarPage() {
             </ScrollArea>
           </CardContent>
         </Card>
+
+        {/* Pending Approval Dialogs */}
+        {pendingEdits.filter(e => e.content_type === 'event' && e.approver_id === user?.id).length > 0 && (
+          <>
+            {pendingEdits.filter(e => e.content_type === 'event' && e.approver_id === user?.id).map(edit => (
+              <EditConfirmationDialog
+                key={edit.id}
+                isOpen={showPendingEdit && pendingEdits.some(e => e.content_type === 'event' && e.approver_id === user?.id && e.id === edit.id)}
+                requesterName={edit.requester?.display_name || 'Unknown'}
+                contentType="event"
+                action={edit.action as 'edit' | 'delete'}
+                originalData={edit.original_data}
+                newData={edit.new_data}
+                changeDescription={edit.change_description}
+                onApprove={async (editId) => {
+                  await approveEdit(editId);
+                  setShowPendingEdit(false);
+                  fetchEvents();
+                }}
+                onReject={async (editId) => {
+                  await rejectEdit(editId);
+                  setShowPendingEdit(false);
+                }}
+                onClose={() => setShowPendingEdit(false)}
+                editId={edit.id}
+              />
+            ))}
+            {!showPendingEdit && pendingEdits.some(e => e.content_type === 'event' && e.approver_id === user?.id) && (
+              <Button
+                variant="outline"
+                className="fixed bottom-24 right-4 gap-2"
+                onClick={() => setShowPendingEdit(true)}
+              >
+                {pendingEdits.filter(e => e.content_type === 'event' && e.approver_id === user?.id).length} Pending Approval
+              </Button>
+            )}
+          </>
+        )}
+
+        {/* View Modal */}
+        <ViewModal
+          open={!!viewingEvent}
+          onOpenChange={(open) => !open && setViewingEvent(null)}
+          title={viewingEvent?.title || ''}
+          createdAt={viewingEvent?.created_at}
+          visibility={viewingEvent?.visibility}
+          onEdit={() => viewingEvent && openEditDialog(viewingEvent)}
+          onDelete={() => viewingEvent && handleDeleteEvent(viewingEvent.id)}
+          canEdit={true}
+          canDelete={true}
+          author={viewingEvent?.author || null}
+        >
+          <div className="space-y-4">
+            {viewingEvent?.description && <p className="text-foreground whitespace-pre-wrap">{viewingEvent.description}</p>}
+            <div className="space-y-2 text-sm text-muted-foreground">
+              {!viewingEvent?.all_day && viewingEvent?.start_time && (
+                <p className="flex items-center gap-2">
+                  <Clock className="h-4 w-4" />
+                  {format(new Date(viewingEvent.start_time), 'MMMM d, yyyy h:mm a')}
+                  {viewingEvent?.end_time && ` - ${format(new Date(viewingEvent.end_time), 'h:mm a')}`}
+                </p>
+              )}
+              {viewingEvent?.all_day && (
+                <p>All Day Event</p>
+              )}
+            </div>
+          </div>
+        </ViewModal>
       </div>
     </div>
   );

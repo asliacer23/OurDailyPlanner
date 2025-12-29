@@ -10,6 +10,9 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from 
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { supabase } from '@/integrations/supabase/client';
 import { useAuth } from '@/features/auth/hooks/useAuth';
+import { useEditRequests } from '@/hooks/useEditRequests';
+import { EditConfirmationDialog } from '@/components/shared/EditConfirmationDialog';
+import { formatPeso } from '@/lib/currency';
 import { toast } from 'sonner';
 import { format, differenceInDays } from 'date-fns';
 import { cn } from '@/lib/utils';
@@ -32,11 +35,13 @@ interface TravelPlan {
 
 export default function TravelPage() {
   const { user, workspace } = useAuth();
+  const { pendingEdits, requestEdit, approveEdit, rejectEdit } = useEditRequests(workspace?.id || null);
   const [plans, setPlans] = useState<TravelPlan[]>([]);
   const [loading, setLoading] = useState(true);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editingPlan, setEditingPlan] = useState<TravelPlan | null>(null);
   const [viewingPlan, setViewingPlan] = useState<TravelPlan | null>(null);
+  const [showPendingEdit, setShowPendingEdit] = useState(false);
   const [newPlan, setNewPlan] = useState<{
     destination: string;
     start_date: string;
@@ -108,21 +113,31 @@ export default function TravelPage() {
   const handleUpdate = async () => {
     if (!editingPlan) return;
     try {
-      const { error } = await supabase
-        .from('travel_plans')
-        .update({
-          destination: newPlan.destination,
-          start_date: newPlan.start_date,
-          end_date: newPlan.end_date || null,
-          budget: newPlan.budget ? parseFloat(newPlan.budget) : null,
-          status: newPlan.status,
-          notes: newPlan.notes || null,
-          visibility: newPlan.visibility,
-        })
-        .eq('id', editingPlan.id);
+      const newData = {
+        destination: newPlan.destination,
+        start_date: newPlan.start_date,
+        end_date: newPlan.end_date || null,
+        budget: newPlan.budget ? parseFloat(newPlan.budget) : null,
+        status: newPlan.status,
+        notes: newPlan.notes || null,
+        visibility: newPlan.visibility,
+      };
 
-      if (error) throw error;
-      toast.success('Plan updated!');
+      // If user is the author, update directly
+      if (editingPlan.author_id === user?.id) {
+        const { error } = await supabase
+          .from('travel_plans')
+          .update(newData)
+          .eq('id', editingPlan.id);
+
+        if (error) throw error;
+        toast.success('Plan updated!');
+      } else {
+        // Request approval from author
+        await requestEdit('travel_plan', editingPlan.id, 'edit', newData, `Updated travel plan: "${newPlan.destination}"`);
+        toast.success('Edit request sent to plan owner for approval');
+      }
+      
       resetForm();
       fetchPlans();
     } catch (error) {
@@ -131,10 +146,22 @@ export default function TravelPage() {
   };
 
   const handleDelete = async (id: string) => {
+    if (!user?.id) return;
+    const planToDelete = plans.find(p => p.id === id);
+    if (!planToDelete) return;
+
     try {
-      const { error } = await supabase.from('travel_plans').delete().eq('id', id);
-      if (error) throw error;
-      toast.success('Plan deleted');
+      // If user is the author, delete directly
+      if (planToDelete.author_id === user.id) {
+        const { error } = await supabase.from('travel_plans').delete().eq('id', id);
+        if (error) throw error;
+        toast.success('Plan deleted');
+      } else {
+        // Request deletion approval from author
+        await requestEdit('travel_plan', id, 'delete', null, 'Requested to delete this travel plan');
+        toast.success('Delete request sent to plan owner for approval');
+      }
+      
       setViewingPlan(null);
       fetchPlans();
     } catch (error) {
@@ -285,7 +312,7 @@ export default function TravelPage() {
                     {plan.budget && (
                       <div className="flex items-center gap-2">
                         <DollarSign className="h-3.5 w-3.5" />
-                        Budget: ${plan.budget.toLocaleString()}
+                        Budget: {formatPeso(plan.budget)}
                       </div>
                     )}
                   </div>
@@ -323,7 +350,7 @@ export default function TravelPage() {
           {viewingPlan?.budget && (
             <div className="text-sm">
               <p className="text-muted-foreground">Budget</p>
-              <p className="font-medium text-lg">${viewingPlan.budget.toLocaleString()}</p>
+              <p className="font-medium text-lg">{formatPeso(viewingPlan.budget)}</p>
             </div>
           )}
           {viewingPlan?.notes && (
@@ -334,6 +361,44 @@ export default function TravelPage() {
           )}
         </div>
       </ViewModal>
+
+      {pendingEdits.filter(e => e.content_type === 'travel_plan' && e.approver_id === user?.id).length > 0 && (
+        <>
+          {pendingEdits.filter(e => e.content_type === 'travel_plan' && e.approver_id === user?.id).map(edit => (
+            <EditConfirmationDialog
+              key={edit.id}
+              isOpen={showPendingEdit && pendingEdits.some(e => e.content_type === 'travel_plan' && e.approver_id === user?.id && e.id === edit.id)}
+              requesterName={edit.requester?.display_name || 'Unknown'}
+              contentType="travel_plan"
+              action={edit.action as 'edit' | 'delete'}
+              originalData={edit.original_data}
+              newData={edit.new_data}
+              changeDescription={edit.change_description}
+              onApprove={async (editId) => {
+                await approveEdit(editId);
+                setShowPendingEdit(false);
+                fetchTravelPlans();
+              }}
+              onReject={async (editId) => {
+                await rejectEdit(editId);
+                setShowPendingEdit(false);
+              }}
+              onClose={() => setShowPendingEdit(false)}
+              editId={edit.id}
+            />
+          ))}
+          {!showPendingEdit && pendingEdits.some(e => e.content_type === 'travel_plan' && e.approver_id === user?.id) && (
+            <Button
+              variant="outline"
+              className="fixed bottom-24 right-4 gap-2"
+              onClick={() => setShowPendingEdit(true)}
+            >
+              {pendingEdits.filter(e => e.content_type === 'travel_plan' && e.approver_id === user?.id).length} Pending Approval
+            </Button>
+          )}
+        </>
+      )}
     </div>
   );
 }
+

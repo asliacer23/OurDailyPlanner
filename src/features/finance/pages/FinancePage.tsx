@@ -23,9 +23,19 @@ import { Progress } from '@/components/ui/progress';
 import { LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 import { supabase } from '@/integrations/supabase/client';
 import { useAuth } from '@/features/auth/hooks/useAuth';
+import { useEditRequests } from '@/hooks/useEditRequests';
+import { EditConfirmationDialog } from '@/components/shared/EditConfirmationDialog';
+import { AuthorBadge } from '@/components/shared/AuthorBadge';
+import { formatPeso, getPesoColor } from '@/lib/currency';
 import { toast } from 'sonner';
 import { format, getMonth, getYear, subMonths, addMonths } from 'date-fns';
 import { cn } from '@/lib/utils';
+
+interface Profile {
+  id: string;
+  display_name: string | null;
+  avatar_url: string | null;
+}
 
 interface Expense {
   id: string;
@@ -35,6 +45,8 @@ interface Expense {
   finance_category: 'business' | 'personal';
   date: string;
   created_at: string;
+  author_id: string;
+  author?: Profile;
 }
 
 interface Revenue {
@@ -45,6 +57,8 @@ interface Revenue {
   is_recurring: boolean;
   date: string;
   created_at: string;
+  author_id: string;
+  author?: Profile;
 }
 
 interface ExpenseCategory {
@@ -111,12 +125,12 @@ export default function FinancePage() {
       const [expensesRes, revenuesRes, categoriesRes, budgetsRes] = await Promise.all([
         supabase
           .from('expenses')
-          .select('*')
+          .select('*, author:profiles!expenses_author_id_fkey(id, display_name, avatar_url)')
           .eq('workspace_id', workspace.id)
           .order('date', { ascending: false }),
         supabase
           .from('revenues')
-          .select('*')
+          .select('*, author:profiles!revenues_author_id_fkey(id, display_name, avatar_url)')
           .eq('workspace_id', workspace.id)
           .order('date', { ascending: false }),
         supabase
@@ -460,7 +474,7 @@ export default function FinancePage() {
           </CardHeader>
           <CardContent>
             <div className="text-2xl font-bold font-display">
-              ${totalRevenues.toLocaleString()}
+              {formatPeso(totalRevenues)}
             </div>
           </CardContent>
         </Card>
@@ -474,7 +488,7 @@ export default function FinancePage() {
           </CardHeader>
           <CardContent>
             <div className="text-2xl font-bold font-display">
-              ${totalExpenses.toLocaleString()}
+              {formatPeso(totalExpenses)}
             </div>
           </CardContent>
         </Card>
@@ -493,7 +507,7 @@ export default function FinancePage() {
                 netBalance >= 0 ? 'text-success' : 'text-destructive'
               )}
             >
-              ${netBalance.toLocaleString()}
+              {formatPeso(netBalance)}
             </div>
           </CardContent>
         </Card>
@@ -533,11 +547,11 @@ export default function FinancePage() {
                 <div className="space-y-1">
                   <div className="flex justify-between">
                     <span className="text-xs text-muted-foreground">Income:</span>
-                    <span className="text-sm font-semibold">${(currentBudget?.planned_income || 0).toLocaleString()}</span>
+                    <span className="text-sm font-semibold">{formatPeso(currentBudget?.planned_income || 0)}</span>
                   </div>
                   <div className="flex justify-between">
                     <span className="text-xs text-muted-foreground">Expenses:</span>
-                    <span className="text-sm font-semibold">${(currentBudget?.planned_expense || 0).toLocaleString()}</span>
+                    <span className="text-sm font-semibold">{formatPeso(currentBudget?.planned_expense || 0)}</span>
                   </div>
                 </div>
               </CardContent>
@@ -553,11 +567,11 @@ export default function FinancePage() {
                 <div className="space-y-1">
                   <div className="flex justify-between">
                     <span className="text-xs text-muted-foreground">Income:</span>
-                    <span className="text-sm font-semibold text-success">${(currentBudget?.actual_income || 0).toLocaleString()}</span>
+                    <span className="text-sm font-semibold text-success">{formatPeso(currentBudget?.actual_income || 0)}</span>
                   </div>
                   <div className="flex justify-between">
                     <span className="text-xs text-muted-foreground">Expenses:</span>
-                    <span className="text-sm font-semibold text-destructive">${(currentBudget?.actual_expense || 0).toLocaleString()}</span>
+                    <span className="text-sm font-semibold text-destructive">{formatPeso(currentBudget?.actual_expense || 0)}</span>
                   </div>
                 </div>
               </CardContent>
@@ -573,11 +587,11 @@ export default function FinancePage() {
                 <div className="space-y-1">
                   <div className={cn('flex justify-between', budgetSurplus > 0 && 'text-success')}>
                     <span className="text-xs text-muted-foreground">Surplus:</span>
-                    <span className="text-sm font-semibold">${budgetSurplus.toLocaleString()}</span>
+                    <span className="text-sm font-semibold">{formatPeso(budgetSurplus)}</span>
                   </div>
                   <div className={cn('flex justify-between', budgetDeficit > 0 && 'text-destructive')}>
                     <span className="text-xs text-muted-foreground">Deficit:</span>
-                    <span className="text-sm font-semibold">${budgetDeficit.toLocaleString()}</span>
+                    <span className="text-sm font-semibold">{formatPeso(budgetDeficit)}</span>
                   </div>
                 </div>
               </CardContent>
@@ -595,7 +609,7 @@ export default function FinancePage() {
                   <CartesianGrid strokeDasharray="3 3" />
                   <XAxis dataKey="month" />
                   <YAxis />
-                  <Tooltip formatter={(value) => `$${Number(value).toLocaleString()}`} />
+                  <Tooltip formatter={(value) => formatPeso(Number(value))} />
                   <Legend />
                   <Line type="monotone" dataKey="plannedIncome" stroke="#10B981" strokeWidth={2} name="Planned Income" />
                   <Line type="monotone" dataKey="plannedExpense" stroke="#EF4444" strokeWidth={2} name="Planned Expense" />
@@ -682,7 +696,7 @@ export default function FinancePage() {
                   <CartesianGrid strokeDasharray="3 3" />
                   <XAxis dataKey="month" />
                   <YAxis />
-                  <Tooltip formatter={(value) => `$${Number(value).toLocaleString()}`} />
+                  <Tooltip formatter={(value) => formatPeso(Number(value))} />
                   <Legend />
                   <Bar dataKey="plannedExpense" fill="#FCA5A5" name="Planned Expense" />
                   <Bar dataKey="actualExpense" fill="#EF4444" name="Actual Expense" />
@@ -708,12 +722,15 @@ export default function FinancePage() {
                       key={expense.id}
                       className="flex items-center justify-between p-4 hover:bg-muted/50 transition-colors group"
                     >
-                      <div className="flex items-center gap-3">
-                        <div className="h-10 w-10 rounded-full bg-destructive/10 flex items-center justify-center">
+                      <div className="flex items-center gap-3 flex-1">
+                        <div className="h-10 w-10 rounded-full bg-destructive/10 flex items-center justify-center shrink-0">
                           <ArrowDownRight className="h-5 w-5 text-destructive" />
                         </div>
-                        <div>
-                          <p className="font-medium">{expense.description || 'Expense'}</p>
+                        <div className="flex-1">
+                          <div className="flex items-center gap-2 mb-1">
+                            <p className="font-medium">{expense.description || 'Expense'}</p>
+                            <AuthorBadge author={expense.author || null} size="sm" />
+                          </div>
                           <div className="flex items-center gap-2">
                             <span className="text-xs text-muted-foreground">
                               {format(new Date(expense.date), 'MMM d, yyyy')}
@@ -724,9 +741,9 @@ export default function FinancePage() {
                           </div>
                         </div>
                       </div>
-                      <div className="flex items-center gap-3">
+                      <div className="flex items-center gap-3 shrink-0">
                         <span className="font-semibold text-destructive">
-                          -${Number(expense.amount).toLocaleString()}
+                          -{formatPeso(Number(expense.amount))}
                         </span>
                         <Button
                           variant="ghost"
@@ -761,20 +778,23 @@ export default function FinancePage() {
                       key={revenue.id}
                       className="flex items-center justify-between p-4 hover:bg-muted/50 transition-colors group"
                     >
-                      <div className="flex items-center gap-3">
-                        <div className="h-10 w-10 rounded-full bg-success/10 flex items-center justify-center">
+                      <div className="flex items-center gap-3 flex-1">
+                        <div className="h-10 w-10 rounded-full bg-success/10 flex items-center justify-center shrink-0">
                           <ArrowUpRight className="h-5 w-5 text-success" />
                         </div>
-                        <div>
-                          <p className="font-medium">{revenue.source}</p>
+                        <div className="flex-1">
+                          <div className="flex items-center gap-2 mb-1">
+                            <p className="font-medium">{revenue.source}</p>
+                            <AuthorBadge author={revenue.author || null} size="sm" />
+                          </div>
                           <span className="text-xs text-muted-foreground">
                             {format(new Date(revenue.date), 'MMM d, yyyy')}
                           </span>
                         </div>
                       </div>
-                      <div className="flex items-center gap-3">
+                      <div className="flex items-center gap-3 shrink-0">
                         <span className="font-semibold text-success">
-                          +${Number(revenue.amount).toLocaleString()}
+                          +{formatPeso(Number(revenue.amount))}
                         </span>
                         <Button
                           variant="ghost"

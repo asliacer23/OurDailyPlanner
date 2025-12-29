@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Plus, ShoppingCart, Check, Trash2, Package } from 'lucide-react';
+import { Plus, ShoppingCart, Check, Trash2, Package, Edit2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
@@ -7,16 +7,23 @@ import { Label } from '@/components/ui/label';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { Badge } from '@/components/ui/badge';
 import { supabase } from '@/integrations/supabase/client';
 import { useAuth } from '@/features/auth/hooks/useAuth';
-import { toast } from 'sonner';
-import { cn } from '@/lib/utils';
+import { useEditRequests } from '@/hooks/useEditRequests';
+import { EditConfirmationDialog } from '@/components/shared/EditConfirmationDialog';
+import { ViewModal } from '@/components/shared/ViewModal';
 import { AuthorBadge } from '@/components/shared/AuthorBadge';
+import { cn } from '@/lib/utils';
+import { formatPeso } from '@/lib/currency';
+import { toast } from 'sonner';
 
 interface ShoppingList {
   id: string;
   name: string;
   description: string | null;
+  visibility: 'private' | 'shared' | 'business';
   author_id: string;
   created_at: string;
   author?: { id: string; display_name: string | null; avatar_url: string | null };
@@ -35,12 +42,17 @@ interface ShoppingItem {
 
 export default function ShoppingPage() {
   const { user, workspace } = useAuth();
+  const { pendingEdits, requestEdit, approveEdit, rejectEdit } = useEditRequests(workspace?.id || null);
   const [lists, setLists] = useState<ShoppingList[]>([]);
   const [selectedList, setSelectedList] = useState<ShoppingList | null>(null);
+  const [viewingList, setViewingList] = useState<ShoppingList | null>(null);
+  const [editingList, setEditingList] = useState<ShoppingList | null>(null);
+  const [activeTab, setActiveTab] = useState('all');
   const [loading, setLoading] = useState(true);
   const [listDialogOpen, setListDialogOpen] = useState(false);
   const [itemDialogOpen, setItemDialogOpen] = useState(false);
-  const [newList, setNewList] = useState({ name: '', description: '' });
+  const [showPendingEdit, setShowPendingEdit] = useState(false);
+  const [newList, setNewList] = useState({ name: '', description: '', visibility: 'shared' as 'private' | 'shared' | 'business' });
   const [newItem, setNewItem] = useState({ name: '', quantity: '', unit: '', price: '' });
 
   const fetchLists = async () => {
@@ -96,13 +108,14 @@ export default function ShoppingPage() {
       const { data, error } = await supabase.from('shopping_lists').insert({
         name: newList.name,
         description: newList.description || null,
+        visibility: newList.visibility,
         author_id: user.id,
         workspace_id: workspace.id,
       }).select().single();
 
       if (error) throw error;
       toast.success('List created!');
-      setNewList({ name: '', description: '' });
+      setNewList({ name: '', description: '', visibility: 'shared' });
       setListDialogOpen(false);
       fetchLists();
       if (data) {
@@ -111,6 +124,99 @@ export default function ShoppingPage() {
     } catch (error) {
       toast.error('Failed to create list');
     }
+  };
+
+  const handleUpdateList = async () => {
+    if (!editingList || !user?.id) return;
+
+    // Check if editing own list
+    if (editingList.author_id === user.id) {
+      // Direct update - author can always edit own lists
+      try {
+        const { error } = await supabase
+          .from('shopping_lists')
+          .update({
+            name: newList.name,
+            description: newList.description || null,
+            visibility: newList.visibility,
+          })
+          .eq('id', editingList.id);
+
+        if (error) throw error;
+        
+        toast.success('List updated!');
+        resetForm();
+        fetchLists();
+      } catch (error) {
+        toast.error('Failed to update list');
+      }
+    } else {
+      // Request approval from partner
+      const editId = await requestEdit(
+        'shopping_list',
+        editingList.id,
+        'edit',
+        { 
+          name: newList.name,
+          description: newList.description || null,
+          visibility: newList.visibility
+        },
+        `Updated list: "${editingList.name}" → "${newList.name}"`
+      );
+
+      if (editId) {
+        toast.info('Approval request sent to your partner');
+        resetForm();
+      }
+    }
+  };
+
+  const handleDeleteList = async (listId: string) => {
+    const listToDelete = lists.find(l => l.id === listId);
+    if (!listToDelete) return;
+
+    // Check if deleting own list
+    if (listToDelete.author_id === user?.id) {
+      // Direct delete - author can always delete own lists
+      try {
+        const { error } = await supabase.from('shopping_lists').delete().eq('id', listId);
+        if (error) throw error;
+        toast.success('List deleted');
+        if (selectedList?.id === listId) setSelectedList(null);
+        fetchLists();
+      } catch (error: any) {
+        toast.error('Failed to delete list');
+      }
+    } else {
+      // Request approval from partner
+      const editId = await requestEdit(
+        'shopping_list',
+        listId,
+        'delete',
+        null,
+        `Requested deletion of list: "${listToDelete.name}"`
+      );
+
+      if (editId) {
+        toast.info('Delete request sent to your partner');
+      }
+    }
+  };
+
+  const resetForm = () => {
+    setNewList({ name: '', description: '', visibility: 'shared' });
+    setEditingList(null);
+    setListDialogOpen(false);
+  };
+
+  const openEditDialog = (list: ShoppingList) => {
+    setEditingList(list);
+    setNewList({
+      name: list.name,
+      description: list.description || '',
+      visibility: list.visibility,
+    });
+    setListDialogOpen(true);
   };
 
   const handleAddItem = async () => {
@@ -164,21 +270,15 @@ export default function ShoppingPage() {
     }
   };
 
-  const handleDeleteList = async (listId: string) => {
-    try {
-      const { error } = await supabase.from('shopping_lists').delete().eq('id', listId);
-      if (error) throw error;
-      toast.success('List deleted');
-      setSelectedList(null);
-      fetchLists();
-    } catch (error) {
-      toast.error('Failed to delete list');
-    }
-  };
 
   const items = selectedList?.items || [];
   const purchasedCount = items.filter(i => i.is_purchased).length;
   const totalPrice = items.filter(i => i.is_purchased).reduce((sum, i) => sum + (i.price || 0) * (i.quantity || 1), 0);
+
+  const filteredLists = lists.filter(list => {
+    if (activeTab === 'all') return true;
+    return list.visibility === activeTab;
+  });
 
   return (
     <div className="space-y-6 animate-fade-in">
@@ -188,12 +288,17 @@ export default function ShoppingPage() {
           <p className="text-muted-foreground">Manage your shopping lists</p>
         </div>
         
-        <Dialog open={listDialogOpen} onOpenChange={setListDialogOpen}>
+        <Dialog open={listDialogOpen} onOpenChange={(open) => {
+          setListDialogOpen(open);
+          if (!open) resetForm();
+        }}>
           <DialogTrigger asChild>
             <Button><Plus className="h-4 w-4 mr-2" />New List</Button>
           </DialogTrigger>
           <DialogContent>
-            <DialogHeader><DialogTitle>New Shopping List</DialogTitle></DialogHeader>
+            <DialogHeader>
+              <DialogTitle>{editingList ? 'Edit Shopping List' : 'New Shopping List'}</DialogTitle>
+            </DialogHeader>
             <div className="space-y-4 pt-4">
               <div className="space-y-2">
                 <Label>Name</Label>
@@ -203,23 +308,52 @@ export default function ShoppingPage() {
                 <Label>Description (optional)</Label>
                 <Input value={newList.description} onChange={(e) => setNewList({ ...newList, description: e.target.value })} placeholder="Weekly groceries" />
               </div>
-              <Button onClick={handleCreateList} className="w-full">Create List</Button>
+              <div className="space-y-2">
+                <Label>Visibility</Label>
+                <Select
+                  value={newList.visibility}
+                  onValueChange={(value) => 
+                    setNewList({ ...newList, visibility: value as 'private' | 'shared' | 'business' })
+                  }
+                >
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="private">🔒 Private</SelectItem>
+                    <SelectItem value="shared">👫 Shared (Both of you)</SelectItem>
+                    <SelectItem value="business">💼 Business</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <Button onClick={editingList ? handleUpdateList : handleCreateList} className="w-full">
+                {editingList ? 'Update List' : 'Create List'}
+              </Button>
             </div>
           </DialogContent>
         </Dialog>
       </div>
 
       <div className="grid gap-6 lg:grid-cols-[280px_1fr]">
-        {/* Lists sidebar */}
-        <div className="space-y-2">
-          <h2 className="text-sm font-medium text-muted-foreground mb-3">Your Lists</h2>
+        {/* Lists sidebar with tabs */}
+        <div className="space-y-3">
+          <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
+            <TabsList className="grid w-full grid-cols-4">
+              <TabsTrigger value="all" className="text-xs">All</TabsTrigger>
+              <TabsTrigger value="private" className="text-xs">🔒</TabsTrigger>
+              <TabsTrigger value="shared" className="text-xs">👫</TabsTrigger>
+              <TabsTrigger value="business" className="text-xs">💼</TabsTrigger>
+            </TabsList>
+          </Tabs>
+          
+          <h2 className="text-sm font-medium text-muted-foreground mb-2">Your Lists</h2>
           {loading ? (
             Array.from({ length: 3 }).map((_, i) => (
               <Card key={i} className="border-border/50 animate-pulse">
                 <CardContent className="p-3"><div className="h-5 bg-muted rounded w-3/4" /></CardContent>
               </Card>
             ))
-          ) : lists.length === 0 ? (
+          ) : filteredLists.length === 0 ? (
             <Card className="border-border/50 border-dashed">
               <CardContent className="p-4 text-center">
                 <ShoppingCart className="h-8 w-8 text-muted-foreground mx-auto mb-2" />
@@ -227,22 +361,59 @@ export default function ShoppingPage() {
               </CardContent>
             </Card>
           ) : (
-            lists.map((list) => (
+            filteredLists.map((list) => (
               <Card 
                 key={list.id} 
                 className={cn(
-                  'border-border/50 cursor-pointer transition-all hover:shadow-md',
+                  'border-border/50 cursor-pointer transition-all hover:shadow-md group',
                   selectedList?.id === list.id && 'border-primary bg-primary/5'
                 )}
-                onClick={() => { setSelectedList(list); fetchItems(list.id); }}
               >
                 <CardContent className="p-3">
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-2">
+                  <div 
+                    className="flex items-center justify-between cursor-pointer"
+                    onClick={() => { setSelectedList(list); fetchItems(list.id); }}
+                  >
+                    <div className="flex items-center gap-2 flex-1">
                       <ShoppingCart className="h-4 w-4 text-muted-foreground" />
-                      <span className="font-medium">{list.name}</span>
+                      <div className="flex-1 min-w-0">
+                        <span className="font-medium truncate block">{list.name}</span>
+                        <Badge variant="secondary" className="text-xs mt-1 capitalize">
+                          {list.visibility}
+                        </Badge>
+                      </div>
                     </div>
                     <AuthorBadge author={list.author || null} size="sm" />
+                  </div>
+                  <div className="flex gap-1 mt-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-7 w-7"
+                      onClick={() => {
+                        setSelectedList(list);
+                        fetchItems(list.id);
+                        setViewingList(list);
+                      }}
+                    >
+                      <Check className="h-3 w-3" />
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-7 w-7"
+                      onClick={() => openEditDialog(list)}
+                    >
+                      <Edit2 className="h-3 w-3" />
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-7 w-7 text-destructive"
+                      onClick={() => handleDeleteList(list.id)}
+                    >
+                      <Trash2 className="h-3 w-3" />
+                    </Button>
                   </div>
                 </CardContent>
               </Card>
@@ -258,7 +429,7 @@ export default function ShoppingPage() {
                 <CardTitle className="font-display">{selectedList?.name || 'Select a list'}</CardTitle>
                 {selectedList && (
                   <p className="text-sm text-muted-foreground mt-1">
-                    {purchasedCount}/{items.length} items • ${totalPrice.toFixed(2)} spent
+                    {purchasedCount}/{items.length} items • {formatPeso(totalPrice)} spent
                   </p>
                 )}
               </div>
@@ -339,7 +510,7 @@ export default function ShoppingPage() {
                       )}
                     </div>
                     {item.price && (
-                      <span className="text-sm font-medium">${(item.price * (item.quantity || 1)).toFixed(2)}</span>
+                      <span className="text-sm font-medium">{formatPeso(item.price * (item.quantity || 1))}</span>
                     )}
                     <Button 
                       variant="ghost" 
@@ -355,7 +526,116 @@ export default function ShoppingPage() {
             )}
           </CardContent>
         </Card>
+
+        {pendingEdits.filter(e => e.content_type === 'shopping_list' && e.approver_id === user?.id).length > 0 && (
+          <>
+            {pendingEdits.filter(e => e.content_type === 'shopping_list' && e.approver_id === user?.id).map(edit => (
+              <EditConfirmationDialog
+                key={edit.id}
+                isOpen={showPendingEdit && pendingEdits.some(e => e.content_type === 'shopping_list' && e.approver_id === user?.id && e.id === edit.id)}
+                requesterName={edit.requester?.display_name || 'Unknown'}
+                contentType="shopping_list"
+                action={edit.action as 'edit' | 'delete'}
+                originalData={edit.original_data}
+                newData={edit.new_data}
+                changeDescription={edit.change_description}
+                onApprove={async (editId) => {
+                  await approveEdit(editId);
+                  setShowPendingEdit(false);
+                  fetchLists();
+                }}
+                onReject={async (editId) => {
+                  await rejectEdit(editId);
+                  setShowPendingEdit(false);
+                }}
+                onClose={() => setShowPendingEdit(false)}
+                editId={edit.id}
+              />
+            ))}
+            {!showPendingEdit && pendingEdits.some(e => e.content_type === 'shopping_list' && e.approver_id === user?.id) && (
+              <Button
+                variant="outline"
+                className="fixed bottom-24 right-4 gap-2"
+                onClick={() => setShowPendingEdit(true)}
+              >
+                {pendingEdits.filter(e => e.content_type === 'shopping_list' && e.approver_id === user?.id).length} Pending Approval
+              </Button>
+            )}
+          </>
+        )}
+
+      {/* View Modal */}
+      <ViewModal
+        open={!!viewingList}
+        onOpenChange={(open) => !open && setViewingList(null)}
+        title={viewingList?.name || ""}
+        createdAt={viewingList?.created_at}
+        visibility={viewingList?.visibility}
+        onEdit={() => {
+          openEditDialog(viewingList!);
+          setViewingList(null);
+        }}
+        onDelete={() => {
+          handleDeleteList(viewingList!.id);
+          setViewingList(null);
+        }}
+        canEdit={viewingList && viewingList.author_id === user?.id}
+        canDelete={viewingList && viewingList.author_id === user?.id}
+        author={viewingList?.author || null}
+      >
+        <div className="space-y-3">
+          {viewingList?.description && (
+            <div>
+              <p className="text-sm font-medium text-muted-foreground">Description</p>
+              <p className="text-sm mt-1">{viewingList.description}</p>
+            </div>
+          )}
+          <div>
+            <p className="text-sm font-medium text-muted-foreground">Items</p>
+            <p className="text-sm mt-1">{viewingList?.items && viewingList.items.length > 0 ? `${viewingList.items.length} items` : 'No items'}</p>
+          </div>
+        </div>
+      </ViewModal>
+
+      {/* Pending Approval Dialogs */}
+      {pendingEdits.filter(e => e.content_type === 'shopping_list' && e.approver_id === user?.id).length > 0 && (
+        <>
+          {pendingEdits.filter(e => e.content_type === 'shopping_list' && e.approver_id === user?.id).map(edit => (
+            <EditConfirmationDialog
+              key={edit.id}
+              isOpen={showPendingEdit && pendingEdits.some(e => e.content_type === 'shopping_list' && e.approver_id === user?.id && e.id === edit.id)}
+              requesterName={edit.requester?.display_name || 'Unknown'}
+              contentType="shopping_list"
+              action={edit.action as 'edit' | 'delete'}
+              originalData={edit.original_data}
+              newData={edit.new_data}
+              changeDescription={edit.change_description}
+              onApprove={async (editId) => {
+                await approveEdit(editId);
+                setShowPendingEdit(false);
+                fetchLists();
+              }}
+              onReject={async (editId) => {
+                await rejectEdit(editId);
+                setShowPendingEdit(false);
+              }}
+              onClose={() => setShowPendingEdit(false)}
+              editId={edit.id}
+            />
+          ))}
+          {!showPendingEdit && pendingEdits.some(e => e.content_type === 'shopping_list' && e.approver_id === user?.id) && (
+            <Button
+              variant="outline"
+              className="fixed bottom-24 right-4 gap-2"
+              onClick={() => setShowPendingEdit(true)}
+            >
+              {pendingEdits.filter(e => e.content_type === 'shopping_list' && e.approver_id === user?.id).length} Pending Approval
+            </Button>
+          )}
+        </>
+      )}
       </div>
     </div>
   );
 }
+

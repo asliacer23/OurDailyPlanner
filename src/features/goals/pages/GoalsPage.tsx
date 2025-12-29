@@ -12,6 +12,8 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Slider } from '@/components/ui/slider';
 import { supabase } from '@/integrations/supabase/client';
 import { useAuth } from '@/features/auth/hooks/useAuth';
+import { useEditRequests } from '@/hooks/useEditRequests';
+import { EditConfirmationDialog } from '@/components/shared/EditConfirmationDialog';
 import { toast } from 'sonner';
 import { format } from 'date-fns';
 import { cn } from '@/lib/utils';
@@ -36,11 +38,13 @@ const CATEGORIES = ['personal', 'career', 'health', 'finance', 'relationship', '
 
 export default function GoalsPage() {
   const { user, workspace } = useAuth();
+  const { pendingEdits, requestEdit, approveEdit, rejectEdit } = useEditRequests(workspace?.id || null);
   const [goals, setGoals] = useState<Goal[]>([]);
   const [loading, setLoading] = useState(true);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editingGoal, setEditingGoal] = useState<Goal | null>(null);
   const [viewingGoal, setViewingGoal] = useState<Goal | null>(null);
+  const [showPendingEdit, setShowPendingEdit] = useState(false);
   const [newGoal, setNewGoal] = useState<{
     title: string;
     description: string;
@@ -108,21 +112,31 @@ export default function GoalsPage() {
   const handleUpdate = async () => {
     if (!editingGoal) return;
     try {
-      const { error } = await supabase
-        .from('goals')
-        .update({
-          title: newGoal.title,
-          description: newGoal.description || null,
-          category: newGoal.category,
-          status: newGoal.status,
-          progress: newGoal.progress,
-          target_date: newGoal.target_date || null,
-          visibility: newGoal.visibility,
-        })
-        .eq('id', editingGoal.id);
+      const newData = {
+        title: newGoal.title,
+        description: newGoal.description || null,
+        category: newGoal.category,
+        status: newGoal.status,
+        progress: newGoal.progress,
+        target_date: newGoal.target_date || null,
+        visibility: newGoal.visibility,
+      };
 
-      if (error) throw error;
-      toast.success('Goal updated!');
+      // If user is the author, update directly
+      if (editingGoal.author_id === user?.id) {
+        const { error } = await supabase
+          .from('goals')
+          .update(newData)
+          .eq('id', editingGoal.id);
+
+        if (error) throw error;
+        toast.success('Goal updated!');
+      } else {
+        // Request approval from author
+        await requestEdit('goal', editingGoal.id, 'edit', newData, `Updated goal: "${newGoal.title}"`);
+        toast.success('Edit request sent to goal owner for approval');
+      }
+      
       resetForm();
       fetchGoals();
     } catch (error) {
@@ -131,10 +145,22 @@ export default function GoalsPage() {
   };
 
   const handleDelete = async (id: string) => {
+    if (!user?.id) return;
+    const goalToDelete = goals.find(g => g.id === id);
+    if (!goalToDelete) return;
+
     try {
-      const { error } = await supabase.from('goals').delete().eq('id', id);
-      if (error) throw error;
-      toast.success('Goal deleted');
+      // If user is the author, delete directly
+      if (goalToDelete.author_id === user.id) {
+        const { error } = await supabase.from('goals').delete().eq('id', id);
+        if (error) throw error;
+        toast.success('Goal deleted');
+      } else {
+        // Request deletion approval from author
+        await requestEdit('goal', id, 'delete', null, 'Requested to delete this goal');
+        toast.success('Delete request sent to goal owner for approval');
+      }
+      
       setViewingGoal(null);
       fetchGoals();
     } catch (error) {
@@ -312,6 +338,44 @@ export default function GoalsPage() {
           )}
         </div>
       </ViewModal>
+
+      {pendingEdits.filter(e => e.content_type === 'goal' && e.approver_id === user?.id).length > 0 && (
+        <>
+          {pendingEdits.filter(e => e.content_type === 'goal' && e.approver_id === user?.id).map(edit => (
+            <EditConfirmationDialog
+              key={edit.id}
+              isOpen={showPendingEdit && pendingEdits.some(e => e.content_type === 'goal' && e.approver_id === user?.id && e.id === edit.id)}
+              requesterName={edit.requester?.display_name || 'Unknown'}
+              contentType="goal"
+              action={edit.action as 'edit' | 'delete'}
+              originalData={edit.original_data}
+              newData={edit.new_data}
+              changeDescription={edit.change_description}
+              onApprove={async (editId) => {
+                await approveEdit(editId);
+                setShowPendingEdit(false);
+                fetchGoals();
+              }}
+              onReject={async (editId) => {
+                await rejectEdit(editId);
+                setShowPendingEdit(false);
+              }}
+              onClose={() => setShowPendingEdit(false)}
+              editId={edit.id}
+            />
+          ))}
+          {!showPendingEdit && pendingEdits.some(e => e.content_type === 'goal' && e.approver_id === user?.id) && (
+            <Button
+              variant="outline"
+              className="fixed bottom-24 right-4 gap-2"
+              onClick={() => setShowPendingEdit(true)}
+            >
+              {pendingEdits.filter(e => e.content_type === 'goal' && e.approver_id === user?.id).length} Pending Approval
+            </Button>
+          )}
+        </>
+      )}
     </div>
   );
 }
+

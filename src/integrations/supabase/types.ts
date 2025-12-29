@@ -2488,6 +2488,79 @@ export type Database = {
           },
         ]
       }
+      pending_edits: {
+        Row: {
+          action: string
+          approver_id: string
+          change_description: string | null
+          content_id: string
+          content_type: string
+          created_at: string
+          id: string
+          new_data: Json | null
+          original_data: Json | null
+          requester_id: string
+          status: string
+          updated_at: string
+          workspace_id: string
+          approved_at: string | null
+        }
+        Insert: {
+          action: string
+          approver_id: string
+          change_description?: string | null
+          content_id: string
+          content_type: string
+          created_at?: string
+          id?: string
+          new_data?: Json | null
+          original_data?: Json | null
+          requester_id: string
+          status?: string
+          updated_at?: string
+          workspace_id: string
+          approved_at?: string | null
+        }
+        Update: {
+          action?: string
+          approver_id?: string
+          change_description?: string | null
+          content_id?: string
+          content_type?: string
+          created_at?: string
+          id?: string
+          new_data?: Json | null
+          original_data?: Json | null
+          requester_id?: string
+          status?: string
+          updated_at?: string
+          workspace_id?: string
+          approved_at?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "pending_edits_workspace_id_fkey"
+            columns: ["workspace_id"]
+            isOneToOne: false
+            referencedRelation: "workspaces"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "pending_edits_requester_id_fkey"
+            columns: ["requester_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "pending_edits_approver_id_fkey"
+            columns: ["approver_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          }
+        ]
+      }
       workspaces: {
         Row: {
           created_at: string
@@ -2514,6 +2587,10 @@ export type Database = {
       [_ in never]: never
     }
     Functions: {
+      approve_edit: {
+        Args: { p_edit_id: string }
+        Returns: boolean
+      }
       can_view_item: {
         Args: {
           item_author_id: string
@@ -2535,6 +2612,21 @@ export type Database = {
       is_workspace_member: {
         Args: { user_uuid: string; ws_id: string }
         Returns: boolean
+      }
+      reject_edit: {
+        Args: { p_edit_id: string }
+        Returns: boolean
+      }
+      request_edit: {
+        Args: {
+          p_workspace_id: string
+          p_content_type: string
+          p_content_id: string
+          p_action: string
+          p_new_data?: Json
+          p_description?: string
+        }
+        Returns: string
       }
     }
     Enums: {
