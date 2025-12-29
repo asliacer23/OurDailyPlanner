@@ -3,6 +3,7 @@ import { Button } from '@/components/ui/button';
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import { ThemeToggle } from './ThemeToggle';
 import { Badge } from '@/components/ui/badge';
+import { OfflineIndicator } from '@/components/shared/OfflineIndicator';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -96,6 +97,8 @@ export function Header({
           </Button>
 
           <ThemeToggle />
+
+          <OfflineIndicator />
 
           <DropdownMenu>
             <DropdownMenuTrigger asChild>

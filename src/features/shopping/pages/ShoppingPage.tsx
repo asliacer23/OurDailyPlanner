@@ -12,6 +12,8 @@ import { Badge } from '@/components/ui/badge';
 import { supabase } from '@/integrations/supabase/client';
 import { useAuth } from '@/features/auth/hooks/useAuth';
 import { useEditRequests } from '@/hooks/useEditRequests';
+import { useOnlineStatus, useOnReconnect } from '@/hooks/useOnlineStatus';
+import { fetchWithCache, subscribeToTable } from '@/lib/cacheAndSync';
 import { EditConfirmationDialog } from '@/components/shared/EditConfirmationDialog';
 import { ViewModal } from '@/components/shared/ViewModal';
 import { AuthorBadge } from '@/components/shared/AuthorBadge';
@@ -24,6 +26,7 @@ interface ShoppingList {
   name: string;
   description: string | null;
   visibility: 'private' | 'shared' | 'business';
+  workspace_id: string;
   author_id: string;
   created_at: string;
   author?: { id: string; display_name: string | null; avatar_url: string | null };
@@ -42,6 +45,7 @@ interface ShoppingItem {
 
 export default function ShoppingPage() {
   const { user, workspace } = useAuth();
+  const { isOnline } = useOnlineStatus();
   const { pendingEdits, requestEdit, approveEdit, rejectEdit } = useEditRequests(workspace?.id || null);
   const [lists, setLists] = useState<ShoppingList[]>([]);
   const [selectedList, setSelectedList] = useState<ShoppingList | null>(null);
@@ -58,21 +62,25 @@ export default function ShoppingPage() {
   const fetchLists = async () => {
     if (!workspace?.id) return;
     try {
-      const { data, error } = await supabase
+      const query = supabase
         .from('shopping_lists')
         .select('*, author:profiles!shopping_lists_author_id_fkey(id, display_name, avatar_url)')
         .eq('workspace_id', workspace.id)
         .order('created_at', { ascending: false });
 
-      if (error) throw error;
-      setLists(data as ShoppingList[]);
-      
-      if (data && data.length > 0 && !selectedList) {
-        fetchItems(data[0].id);
-        setSelectedList(data[0] as ShoppingList);
+      const data = await fetchWithCache(query, { cacheKey: `shopping_lists_${workspace.id}`, ttl: 300000 });
+      if (data && Array.isArray(data)) {
+        setLists(data as ShoppingList[]);
+        
+        if (data.length > 0 && !selectedList) {
+          fetchItems(data[0].id);
+          setSelectedList(data[0] as ShoppingList);
+        }
+      } else if (isOnline) {
+        toast.error('Failed to load lists');
       }
     } catch (error) {
-      toast.error('Failed to load lists');
+      if (isOnline) toast.error('Failed to load lists');
     } finally {
       setLoading(false);
     }
@@ -95,8 +103,41 @@ export default function ShoppingPage() {
   };
 
   useEffect(() => {
-    fetchLists();
-  }, [workspace?.id]);
+    if (workspace?.id) {
+      fetchLists();
+
+      // Real-time subscription
+      const unsubscribe = subscribeToTable<ShoppingList>(
+        'shopping_lists',
+        (updated) => {
+          if (updated.workspace_id === workspace.id) {
+            setLists((prev) =>
+              prev.map((l) => (l.id === updated.id ? updated : l))
+            );
+          }
+        },
+        (newList) => {
+          if (newList.workspace_id === workspace.id) {
+            setLists((prev) => [newList, ...prev]);
+          }
+        },
+        (deleted) => {
+          if (deleted.workspace_id === workspace.id) {
+            setLists((prev) => prev.filter((l) => l.id !== deleted.id));
+          }
+        },
+        `workspace_id=eq.${workspace.id}`
+      );
+
+      return unsubscribe;
+    }
+  }, [workspace?.id, isOnline]);
+
+  useOnReconnect(async () => {
+    if (workspace?.id) {
+      await fetchLists();
+    }
+  });
 
   const handleCreateList = async () => {
     if (!user?.id || !workspace?.id || !newList.name) {

@@ -12,6 +12,8 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { supabase } from '@/integrations/supabase/client';
 import { useAuth } from '@/features/auth/hooks/useAuth';
 import { useEditRequests } from '@/hooks/useEditRequests';
+import { useOnlineStatus, useOnReconnect } from '@/hooks/useOnlineStatus';
+import { fetchWithCache, subscribeToTable } from '@/lib/cacheAndSync';
 import { EditConfirmationDialog } from '@/components/shared/EditConfirmationDialog';
 import { toast } from 'sonner';
 import { format } from 'date-fns';
@@ -36,6 +38,7 @@ interface Task {
 export default function TasksPage() {
   const { user, workspace } = useAuth();
   const { pendingEdits, requestEdit, approveEdit, rejectEdit } = useEditRequests(workspace?.id || null);
+  const { isOnline } = useOnlineStatus();
   const [tasks, setTasks] = useState<Task[]>([]);
   const [loading, setLoading] = useState(true);
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -62,24 +65,68 @@ export default function TasksPage() {
   const fetchTasks = async () => {
     if (!workspace?.id) return;
     try {
-      const { data, error } = await supabase
-        .from('tasks')
-        .select('*, author:profiles!tasks_author_id_fkey(id, display_name, avatar_url)')
-        .eq('workspace_id', workspace.id)
-        .order('created_at', { ascending: false });
+      // Use cache-first strategy
+      const data = await fetchWithCache<Task[]>(
+        supabase
+          .from('tasks')
+          .select('*, author:profiles!tasks_author_id_fkey(id, display_name, avatar_url)')
+          .eq('workspace_id', workspace.id)
+          .order('created_at', { ascending: false }),
+        {
+          cacheKey: `tasks_${workspace.id}`,
+          ttl: 300000, // 5 minutes
+        }
+      );
 
-      if (error) throw error;
-      setTasks(data as Task[]);
+      if (data) {
+        setTasks(data);
+      }
     } catch (error) {
-      toast.error('Failed to load tasks');
+      if (isOnline) {
+        toast.error('Failed to load tasks');
+      }
     } finally {
       setLoading(false);
     }
   };
 
   useEffect(() => {
-    fetchTasks();
-  }, [workspace?.id]);
+    if (workspace?.id) {
+      fetchTasks();
+
+      // Real-time subscription
+      const unsubscribe = subscribeToTable<Task>(
+        'tasks',
+        (updated) => {
+          if (updated.workspace_id === workspace.id) {
+            setTasks((prev) =>
+              prev.map((t) => (t.id === updated.id ? updated : t))
+            );
+          }
+        },
+        (newTask) => {
+          if (newTask.workspace_id === workspace.id) {
+            setTasks((prev) => [newTask, ...prev]);
+          }
+        },
+        (deleted) => {
+          if (deleted.workspace_id === workspace.id) {
+            setTasks((prev) => prev.filter((t) => t.id !== deleted.id));
+          }
+        },
+        `workspace_id=eq.${workspace.id}`
+      );
+
+      return unsubscribe;
+    }
+  }, [workspace?.id, isOnline]);
+
+  // Sync when reconnecting
+  useOnReconnect(async () => {
+    if (workspace?.id) {
+      await fetchTasks();
+    }
+  });
 
   const handleCreate = async () => {
     if (!user?.id || !workspace?.id || !newTask.title) {

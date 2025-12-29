@@ -12,6 +12,8 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { supabase } from '@/integrations/supabase/client';
 import { useAuth } from '@/features/auth/hooks/useAuth';
 import { useEditRequests } from '@/hooks/useEditRequests';
+import { useOnlineStatus, useOnReconnect } from '@/hooks/useOnlineStatus';
+import { fetchWithCache, subscribeToTable } from '@/lib/cacheAndSync';
 import { EditConfirmationDialog } from '@/components/shared/EditConfirmationDialog';
 import { ViewModal } from '@/components/shared/ViewModal';
 import { AuthorBadge } from '@/components/shared/AuthorBadge';
@@ -34,6 +36,7 @@ interface Note {
 export default function NotesPage() {
   const { user, workspace, profile } = useAuth();
   const { pendingEdits, requestEdit, approveEdit, rejectEdit } = useEditRequests(workspace?.id || null);
+  const { isOnline } = useOnlineStatus();
   const [notes, setNotes] = useState<Note[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
@@ -60,17 +63,27 @@ export default function NotesPage() {
     }
     
     try {
-      const { data, error } = await supabase
-        .from('notes')
-        .select('*, author:profiles!notes_author_id_fkey(id, display_name, avatar_url)')
-        .eq('workspace_id', workspace.id)
-        .order('updated_at', { ascending: false });
+      // Use cache-first strategy for offline support
+      const data = await fetchWithCache<Note[]>(
+        supabase
+          .from('notes')
+          .select('*, author:profiles!notes_author_id_fkey(id, display_name, avatar_url)')
+          .eq('workspace_id', workspace.id)
+          .order('updated_at', { ascending: false }),
+        {
+          cacheKey: `notes_${workspace.id}`,
+          ttl: 300000, // 5 minutes
+        }
+      );
 
-      if (error) throw error;
-      setNotes(data as Note[]);
+      if (data) {
+        setNotes(data);
+      }
     } catch (error: any) {
       console.error('Failed to load notes:', error);
-      toast.error('Failed to load notes');
+      if (isOnline) {
+        toast.error('Failed to load notes');
+      }
     } finally {
       setLoading(false);
     }
@@ -79,8 +92,43 @@ export default function NotesPage() {
   useEffect(() => {
     if (workspace?.id) {
       fetchNotes();
+
+      // Setup real-time subscription
+      const unsubscribe = subscribeToTable<Note>(
+        'notes',
+        (updated) => {
+          if (updated.workspace_id === workspace.id) {
+            setNotes((prev) =>
+              prev.map((n) => (n.id === updated.id ? updated : n))
+            );
+            toast.success('Note updated');
+          }
+        },
+        (newNote) => {
+          if (newNote.workspace_id === workspace.id) {
+            setNotes((prev) => [newNote, ...prev]);
+            toast.success('New note added');
+          }
+        },
+        (deleted) => {
+          if (deleted.workspace_id === workspace.id) {
+            setNotes((prev) => prev.filter((n) => n.id !== deleted.id));
+            toast.success('Note deleted');
+          }
+        },
+        `workspace_id=eq.${workspace.id}`
+      );
+
+      return unsubscribe;
     }
-  }, [workspace?.id]);
+  }, [workspace?.id, isOnline]);
+
+  // Sync notes when reconnecting
+  useOnReconnect(async () => {
+    if (workspace?.id) {
+      await fetchNotes();
+    }
+  });
 
   const handleCreateNote = async () => {
     if (!user?.id || !workspace?.id || !newNote.title) {

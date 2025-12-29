@@ -12,6 +12,8 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { supabase } from '@/integrations/supabase/client';
 import { useAuth } from '@/features/auth/hooks/useAuth';
 import { useEditRequests } from '@/hooks/useEditRequests';
+import { useOnlineStatus, useOnReconnect } from '@/hooks/useOnlineStatus';
+import { fetchWithCache, subscribeToTable } from '@/lib/cacheAndSync';
 import { EditConfirmationDialog } from '@/components/shared/EditConfirmationDialog';
 import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
@@ -27,6 +29,7 @@ interface Book {
   is_read: boolean;
   notes: string | null;
   visibility: 'private' | 'shared' | 'business';
+  workspace_id: string;
   author_id: string;
   created_at: string;
   author?: { id: string; display_name: string | null; avatar_url: string | null };
@@ -36,6 +39,7 @@ const GENRES = ['Fiction', 'Non-Fiction', 'Mystery', 'Romance', 'Sci-Fi', 'Fanta
 
 export default function BooksPage() {
   const { user, workspace } = useAuth();
+  const { isOnline } = useOnlineStatus();
   const { pendingEdits, requestEdit, approveEdit, rejectEdit } = useEditRequests(workspace?.id || null);
   const [books, setBooks] = useState<Book[]>([]);
   const [loading, setLoading] = useState(true);
@@ -65,24 +69,61 @@ export default function BooksPage() {
   const fetchBooks = async () => {
     if (!workspace?.id) return;
     try {
-      const { data, error } = await supabase
+      const query = supabase
         .from('books_read_list')
         .select('*, author:profiles!books_read_list_author_id_fkey(id, display_name, avatar_url)')
         .eq('workspace_id', workspace.id)
         .order('created_at', { ascending: false });
 
-      if (error) throw error;
-      setBooks(data as Book[]);
+      const data = await fetchWithCache(query, { cacheKey: `books_${workspace.id}`, ttl: 1800000 });
+      if (data) {
+        setBooks(data as Book[]);
+      } else if (isOnline) {
+        toast.error('Failed to load books');
+      }
     } catch (error) {
-      toast.error('Failed to load books');
+      if (isOnline) toast.error('Failed to load books');
     } finally {
       setLoading(false);
     }
   };
 
   useEffect(() => {
-    fetchBooks();
-  }, [workspace?.id]);
+    if (workspace?.id) {
+      fetchBooks();
+
+      // Real-time subscription
+      const unsubscribe = subscribeToTable<Book>(
+        'books_read_list',
+        (updated) => {
+          if (updated.workspace_id === workspace.id) {
+            setBooks((prev) =>
+              prev.map((b) => (b.id === updated.id ? updated : b))
+            );
+          }
+        },
+        (newBook) => {
+          if (newBook.workspace_id === workspace.id) {
+            setBooks((prev) => [newBook, ...prev]);
+          }
+        },
+        (deleted) => {
+          if (deleted.workspace_id === workspace.id) {
+            setBooks((prev) => prev.filter((b) => b.id !== deleted.id));
+          }
+        },
+        `workspace_id=eq.${workspace.id}`
+      );
+
+      return unsubscribe;
+    }
+  }, [workspace?.id, isOnline]);
+
+  useOnReconnect(async () => {
+    if (workspace?.id) {
+      await fetchBooks();
+    }
+  });
 
   const handleCreate = async () => {
     if (!user?.id || !workspace?.id || !newBook.title) {

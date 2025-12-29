@@ -15,6 +15,8 @@ import { ScrollArea } from '@/components/ui/scroll-area';
 import { supabase } from '@/integrations/supabase/client';
 import { useAuth } from '@/features/auth/hooks/useAuth';
 import { useEditRequests } from '@/hooks/useEditRequests';
+import { useOnlineStatus, useOnReconnect } from '@/hooks/useOnlineStatus';
+import { fetchWithCache, subscribeToTable } from '@/lib/cacheAndSync';
 import { EditConfirmationDialog } from '@/components/shared/EditConfirmationDialog';
 import { AuthorBadge } from '@/components/shared/AuthorBadge';
 import { ViewModal } from '@/components/shared/ViewModal';
@@ -29,6 +31,7 @@ interface Event {
   all_day: boolean;
   color: string;
   visibility: 'private' | 'shared' | 'business';
+  workspace_id: string;
   author_id: string;
   author?: Profile;
   created_at?: string;
@@ -52,6 +55,7 @@ const EVENT_COLORS = [
 
 export default function CalendarPage() {
   const { user, workspace } = useAuth();
+  const { isOnline } = useOnlineStatus();
   const { pendingEdits, requestEdit, approveEdit, rejectEdit } = useEditRequests(workspace?.id || null);
   const [currentDate, setCurrentDate] = useState(new Date());
   const [selectedDate, setSelectedDate] = useState<Date | null>(null);
@@ -94,16 +98,20 @@ export default function CalendarPage() {
     if (!workspace?.id) return;
     
     try {
-      const { data, error } = await supabase
+      const query = supabase
         .from('events')
         .select('*')
         .eq('workspace_id', workspace.id)
         .order('start_time', { ascending: true });
 
-      if (error) throw error;
-      setEvents(data as Event[]);
+      const data = await fetchWithCache(query, { cacheKey: `events_${workspace.id}`, ttl: 300000 });
+      if (data) {
+        setEvents(data as Event[]);
+      } else if (isOnline) {
+        toast.error('Failed to load events');
+      }
     } catch (error) {
-      toast.error('Failed to load events');
+      if (isOnline) toast.error('Failed to load events');
     } finally {
       setLoading(false);
     }
@@ -111,7 +119,39 @@ export default function CalendarPage() {
 
   useEffect(() => {
     fetchEvents();
+
+    if (!workspace?.id) return;
+
+    const unsubscribe = subscribeToTable<Event>(
+      'events',
+      (updated) => {
+        if (updated.workspace_id === workspace.id) {
+          setEvents((prev) =>
+            prev.map((e) => (e.id === updated.id ? updated : e))
+          );
+        }
+      },
+      (newEvent) => {
+        if (newEvent.workspace_id === workspace.id) {
+          setEvents((prev) => [newEvent, ...prev]);
+        }
+      },
+      (deleted) => {
+        if (deleted.workspace_id === workspace.id) {
+          setEvents((prev) => prev.filter((e) => e.id !== deleted.id));
+        }
+      },
+      `workspace_id=eq.${workspace.id}`
+    );
+
+    return unsubscribe;
   }, [workspace?.id]);
+
+  useOnReconnect(async () => {
+    if (workspace?.id) {
+      await fetchEvents();
+    }
+  });
 
   const goToPreviousMonth = () => setCurrentDate(subMonths(currentDate, 1));
   const goToNextMonth = () => setCurrentDate(addMonths(currentDate, 1));

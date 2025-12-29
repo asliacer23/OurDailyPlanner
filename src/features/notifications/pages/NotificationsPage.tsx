@@ -6,6 +6,8 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Badge } from '@/components/ui/badge';
 import { supabase } from '@/integrations/supabase/client';
 import { useAuth } from '@/features/auth/hooks/useAuth';
+import { useOnlineStatus, useOnReconnect } from '@/hooks/useOnlineStatus';
+import { fetchWithCache, subscribeToTable } from '@/lib/cacheAndSync';
 import { toast } from 'sonner';
 import { format, formatDistanceToNow } from 'date-fns';
 import { cn } from '@/lib/utils';
@@ -16,6 +18,7 @@ interface Notification {
   message: string | null;
   read: boolean;
   type: string;
+  user_id: string;
   created_at: string;
 }
 
@@ -28,6 +31,7 @@ const NOTIFICATION_TYPES = {
 
 export default function NotificationsPage() {
   const { user } = useAuth();
+  const { isOnline } = useOnlineStatus();
   const [notifications, setNotifications] = useState<Notification[]>([]);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState('unread');
@@ -36,24 +40,59 @@ export default function NotificationsPage() {
     if (!user?.id) return;
 
     try {
-      const { data, error } = await supabase
-        .from('notifications')
-        .select('*')
-        .eq('user_id', user.id)
-        .order('created_at', { ascending: false });
-
-      if (error) throw error;
+      const data = await fetchWithCache(
+        supabase
+          .from('notifications')
+          .select('*')
+          .eq('user_id', user.id)
+          .order('created_at', { ascending: false }),
+        { cacheKey: `notifications_${user.id}`, ttl: 60000 }
+      );
       setNotifications(data as Notification[]);
     } catch (error) {
-      toast.error('Failed to load notifications');
+      if (isOnline) {
+        toast.error('Failed to load notifications');
+      }
     } finally {
       setLoading(false);
     }
   };
 
   useEffect(() => {
+    if (!user?.id) return;
+
     fetchNotifications();
-  }, [user?.id]);
+
+    const unsubscribe = subscribeToTable<Notification>(
+      'notifications',
+      (updated) => {
+        if (updated.user_id === user.id) {
+          setNotifications((prev) =>
+            prev.map((n) => (n.id === updated.id ? updated : n))
+          );
+        }
+      },
+      (newNotif) => {
+        if (newNotif.user_id === user.id) {
+          setNotifications((prev) => [newNotif, ...prev]);
+        }
+      },
+      (deleted) => {
+        if (deleted.user_id === user.id) {
+          setNotifications((prev) => prev.filter((n) => n.id !== deleted.id));
+        }
+      },
+      `user_id=eq.${user.id}`
+    );
+
+    return unsubscribe;
+  }, [user?.id, isOnline]);
+
+  useOnReconnect(async () => {
+    if (user?.id) {
+      await fetchNotifications();
+    }
+  });
 
   const markAsRead = async (id: string) => {
     try {

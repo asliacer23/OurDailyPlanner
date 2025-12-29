@@ -11,6 +11,8 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { supabase } from '@/integrations/supabase/client';
 import { useAuth } from '@/features/auth/hooks/useAuth';
+import { useOnlineStatus, useOnReconnect } from '@/hooks/useOnlineStatus';
+import { fetchWithCache, subscribeToTable } from '@/lib/cacheAndSync';
 import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
 import { ViewModal } from '@/components/shared/ViewModal';
@@ -34,6 +36,7 @@ const GENRES = ['Action', 'Comedy', 'Drama', 'Horror', 'Romance', 'Sci-Fi', 'Thr
 
 export default function MoviesPage() {
   const { user, workspace } = useAuth();
+  const { isOnline } = useOnlineStatus();
   const [movies, setMovies] = useState<Movie[]>([]);
   const [loading, setLoading] = useState(true);
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -61,16 +64,19 @@ export default function MoviesPage() {
   const fetchMovies = async () => {
     if (!workspace?.id) return;
     try {
-      const { data, error } = await supabase
-        .from('movies_watch_list')
-        .select('*, author:profiles!movies_watch_list_author_id_fkey(id, display_name, avatar_url)')
-        .eq('workspace_id', workspace.id)
-        .order('created_at', { ascending: false });
-
-      if (error) throw error;
+      const data = await fetchWithCache(
+        () => supabase
+          .from('movies_watch_list')
+          .select('*, author:profiles!movies_watch_list_author_id_fkey(id, display_name, avatar_url)')
+          .eq('workspace_id', workspace.id)
+          .order('created_at', { ascending: false }),
+        { cacheKey: `movies_${workspace.id}`, ttl: 3600000 }
+      );
       setMovies(data as Movie[]);
     } catch (error) {
-      toast.error('Failed to load movies');
+      if (isOnline) {
+        toast.error('Failed to load movies');
+      }
     } finally {
       setLoading(false);
     }
@@ -78,7 +84,38 @@ export default function MoviesPage() {
 
   useEffect(() => {
     fetchMovies();
+    if (!workspace?.id) return;
+
+    const unsubscribe = subscribeToTable(
+      'movies_watch_list',
+      {
+        event: '*',
+        schema: 'public',
+        filter: `workspace_id=eq.${workspace.id}`,
+      },
+      {
+        onUpdate: (payload) => {
+          setMovies((prev) =>
+            prev.map((m) => (m.id === payload.new.id ? (payload.new as Movie) : m))
+          );
+        },
+        onInsert: (payload) => {
+          setMovies((prev) => [payload.new as Movie, ...prev]);
+        },
+        onDelete: (payload) => {
+          setMovies((prev) => prev.filter((m) => m.id !== payload.old.id));
+        },
+      }
+    );
+
+    return () => unsubscribe();
   }, [workspace?.id]);
+
+  useOnReconnect(async () => {
+    if (workspace?.id) {
+      await fetchMovies();
+    }
+  });
 
   const handleCreate = async () => {
     if (!user?.id || !workspace?.id || !newMovie.title) {

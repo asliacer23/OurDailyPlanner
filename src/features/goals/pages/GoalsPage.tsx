@@ -13,6 +13,8 @@ import { Slider } from '@/components/ui/slider';
 import { supabase } from '@/integrations/supabase/client';
 import { useAuth } from '@/features/auth/hooks/useAuth';
 import { useEditRequests } from '@/hooks/useEditRequests';
+import { useOnlineStatus, useOnReconnect } from '@/hooks/useOnlineStatus';
+import { fetchWithCache, subscribeToTable } from '@/lib/cacheAndSync';
 import { EditConfirmationDialog } from '@/components/shared/EditConfirmationDialog';
 import { toast } from 'sonner';
 import { format } from 'date-fns';
@@ -39,6 +41,7 @@ const CATEGORIES = ['personal', 'career', 'health', 'finance', 'relationship', '
 export default function GoalsPage() {
   const { user, workspace } = useAuth();
   const { pendingEdits, requestEdit, approveEdit, rejectEdit } = useEditRequests(workspace?.id || null);
+  const { isOnline } = useOnlineStatus();
   const [goals, setGoals] = useState<Goal[]>([]);
   const [loading, setLoading] = useState(true);
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -66,24 +69,68 @@ export default function GoalsPage() {
   const fetchGoals = async () => {
     if (!workspace?.id) return;
     try {
-      const { data, error } = await supabase
-        .from('goals')
-        .select('*, author:profiles!goals_author_id_fkey(id, display_name, avatar_url)')
-        .eq('workspace_id', workspace.id)
-        .order('created_at', { ascending: false });
+      // Use cache-first strategy
+      const data = await fetchWithCache<Goal[]>(
+        supabase
+          .from('goals')
+          .select('*, author:profiles!goals_author_id_fkey(id, display_name, avatar_url)')
+          .eq('workspace_id', workspace.id)
+          .order('created_at', { ascending: false }),
+        {
+          cacheKey: `goals_${workspace.id}`,
+          ttl: 1800000, // 30 minutes
+        }
+      );
 
-      if (error) throw error;
-      setGoals(data as Goal[]);
+      if (data) {
+        setGoals(data);
+      }
     } catch (error) {
-      toast.error('Failed to load goals');
+      if (isOnline) {
+        toast.error('Failed to load goals');
+      }
     } finally {
       setLoading(false);
     }
   };
 
   useEffect(() => {
-    fetchGoals();
-  }, [workspace?.id]);
+    if (workspace?.id) {
+      fetchGoals();
+
+      // Real-time subscription
+      const unsubscribe = subscribeToTable<Goal>(
+        'goals',
+        (updated) => {
+          if (updated.workspace_id === workspace.id) {
+            setGoals((prev) =>
+              prev.map((g) => (g.id === updated.id ? updated : g))
+            );
+          }
+        },
+        (newGoal) => {
+          if (newGoal.workspace_id === workspace.id) {
+            setGoals((prev) => [newGoal, ...prev]);
+          }
+        },
+        (deleted) => {
+          if (deleted.workspace_id === workspace.id) {
+            setGoals((prev) => prev.filter((g) => g.id !== deleted.id));
+          }
+        },
+        `workspace_id=eq.${workspace.id}`
+      );
+
+      return unsubscribe;
+    }
+  }, [workspace?.id, isOnline]);
+
+  // Sync when reconnecting
+  useOnReconnect(async () => {
+    if (workspace?.id) {
+      await fetchGoals();
+    }
+  });
 
   const handleCreate = async () => {
     if (!user?.id || !workspace?.id || !newGoal.title) {

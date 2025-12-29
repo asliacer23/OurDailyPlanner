@@ -23,6 +23,8 @@ import { LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, L
 import { supabase } from '@/integrations/supabase/client';
 import { useAuth } from '@/features/auth/hooks/useAuth';
 import { useEditRequests } from '@/hooks/useEditRequests';
+import { useOnlineStatus, useOnReconnect } from '@/hooks/useOnlineStatus';
+import { fetchWithCache, subscribeToTable } from '@/lib/cacheAndSync';
 import { EditConfirmationDialog } from '@/components/shared/EditConfirmationDialog';
 import { AuthorBadge } from '@/components/shared/AuthorBadge';
 import { formatPeso, getPesoColor } from '@/lib/currency';
@@ -42,6 +44,7 @@ interface Expense {
   description: string | null;
   expense_type: 'fixed' | 'variable' | 'one_time';
   finance_category: 'business' | 'personal';
+  workspace_id: string;
   date: string;
   created_at: string;
   author_id: string;
@@ -54,6 +57,7 @@ interface Revenue {
   source: string;
   description: string | null;
   is_recurring: boolean;
+  workspace_id: string;
   date: string;
   created_at: string;
   author_id: string;
@@ -79,6 +83,7 @@ interface MonthlyBudget {
 
 export default function FinancePage() {
   const { user, workspace } = useAuth();
+  const { isOnline } = useOnlineStatus();
   const [expenses, setExpenses] = useState<Expense[]>([]);
   const [revenues, setRevenues] = useState<Revenue[]>([]);
   const [categories, setCategories] = useState<ExpenseCategory[]>([]);
@@ -121,48 +126,117 @@ export default function FinancePage() {
     if (!workspace?.id) return;
 
     try {
-      const [expensesRes, revenuesRes, categoriesRes, budgetsRes] = await Promise.all([
-        supabase
-          .from('expenses')
-          .select('*, author:profiles!expenses_author_id_fkey(id, display_name, avatar_url)')
-          .eq('workspace_id', workspace.id)
-          .order('date', { ascending: false }),
-        supabase
-          .from('revenues')
-          .select('*, author:profiles!revenues_author_id_fkey(id, display_name, avatar_url)')
-          .eq('workspace_id', workspace.id)
-          .order('date', { ascending: false }),
-        supabase
-          .from('expense_categories')
-          .select('*')
-          .eq('workspace_id', workspace.id),
-        supabase
-          .from('monthly_budgets')
-          .select('*')
-          .eq('workspace_id', workspace.id)
-          .order('year', { ascending: false })
-          .order('month', { ascending: false }),
+      const [expensesData, revenuesData, categoriesData, budgetsData] = await Promise.all([
+        fetchWithCache(
+          supabase
+            .from('expenses')
+            .select('*, author:profiles!expenses_author_id_fkey(id, display_name, avatar_url)')
+            .eq('workspace_id', workspace.id)
+            .order('date', { ascending: false }),
+          { cacheKey: `expenses_${workspace.id}`, ttl: 300000 }
+        ),
+        fetchWithCache(
+          supabase
+            .from('revenues')
+            .select('*, author:profiles!revenues_author_id_fkey(id, display_name, avatar_url)')
+            .eq('workspace_id', workspace.id)
+            .order('date', { ascending: false }),
+          { cacheKey: `revenues_${workspace.id}`, ttl: 300000 }
+        ),
+        fetchWithCache(
+          supabase
+            .from('expense_categories')
+            .select('*')
+            .eq('workspace_id', workspace.id),
+          { cacheKey: `categories_${workspace.id}`, ttl: 300000 }
+        ),
+        fetchWithCache(
+          supabase
+            .from('monthly_budgets')
+            .select('*')
+            .eq('workspace_id', workspace.id)
+            .order('year', { ascending: false })
+            .order('month', { ascending: false }),
+          { cacheKey: `budgets_${workspace.id}`, ttl: 300000 }
+        ),
       ]);
 
-      if (expensesRes.error) throw expensesRes.error;
-      if (revenuesRes.error) throw revenuesRes.error;
-      if (categoriesRes.error) throw categoriesRes.error;
-      if (budgetsRes.error) throw budgetsRes.error;
-
-      setExpenses(expensesRes.data as Expense[]);
-      setRevenues(revenuesRes.data as Revenue[]);
-      setCategories(categoriesRes.data as ExpenseCategory[]);
-      setMonthlyBudgets(budgetsRes.data as MonthlyBudget[]);
+      if (expensesData) setExpenses(expensesData as Expense[]);
+      if (revenuesData) setRevenues(revenuesData as Revenue[]);
+      if (categoriesData) setCategories(categoriesData as ExpenseCategory[]);
+      if (budgetsData) setMonthlyBudgets(budgetsData as MonthlyBudget[]);
+      
+      if (!expensesData || !revenuesData || !categoriesData || !budgetsData) {
+        if (isOnline) toast.error('Failed to load financial data');
+      }
     } catch (error) {
-      toast.error('Failed to load financial data');
+      if (isOnline) toast.error('Failed to load financial data');
     } finally {
       setLoading(false);
     }
   };
 
   useEffect(() => {
-    fetchData();
-  }, [workspace?.id]);
+    if (workspace?.id) {
+      fetchData();
+
+      // Real-time subscriptions for expenses and revenues
+      const unsubscribeExpenses = subscribeToTable<Expense>(
+        'expenses',
+        (updated) => {
+          if (updated.workspace_id === workspace.id) {
+            setExpenses((prev) =>
+              prev.map((e) => (e.id === updated.id ? updated : e))
+            );
+          }
+        },
+        (newExpense) => {
+          if (newExpense.workspace_id === workspace.id) {
+            setExpenses((prev) => [newExpense, ...prev]);
+          }
+        },
+        (deleted) => {
+          if (deleted.workspace_id === workspace.id) {
+            setExpenses((prev) => prev.filter((e) => e.id !== deleted.id));
+          }
+        },
+        `workspace_id=eq.${workspace.id}`
+      );
+
+      const unsubscribeRevenues = subscribeToTable<Revenue>(
+        'revenues',
+        (updated) => {
+          if (updated.workspace_id === workspace.id) {
+            setRevenues((prev) =>
+              prev.map((r) => (r.id === updated.id ? updated : r))
+            );
+          }
+        },
+        (newRevenue) => {
+          if (newRevenue.workspace_id === workspace.id) {
+            setRevenues((prev) => [newRevenue, ...prev]);
+          }
+        },
+        (deleted) => {
+          if (deleted.workspace_id === workspace.id) {
+            setRevenues((prev) => prev.filter((r) => r.id !== deleted.id));
+          }
+        },
+        `workspace_id=eq.${workspace.id}`
+      );
+
+      return () => {
+        unsubscribeExpenses();
+        unsubscribeRevenues();
+      };
+    }
+  }, [workspace?.id, isOnline]);
+
+  useOnReconnect(async () => {
+    if (workspace?.id) {
+      await fetchData();
+    }
+  });
 
   const handleAddExpense = async () => {
     if (!user?.id || !workspace?.id || !newExpense.amount) return;

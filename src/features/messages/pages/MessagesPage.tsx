@@ -6,6 +6,8 @@ import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { supabase } from '@/integrations/supabase/client';
 import { useAuth } from '@/features/auth/hooks/useAuth';
+import { useOnlineStatus, useOnReconnect } from '@/hooks/useOnlineStatus';
+import { fetchWithCache, subscribeToTable } from '@/lib/cacheAndSync';
 import { toast } from 'sonner';
 import { format, isToday, isYesterday } from 'date-fns';
 import { cn } from '@/lib/utils';
@@ -28,6 +30,7 @@ const QUICK_REACTIONS = ['❤️', '😊', '👍', '😂', '🎉', '💕'];
 
 export default function MessagesPage() {
   const { user, workspace, profile } = useAuth();
+  const { isOnline } = useOnlineStatus();
   const [messages, setMessages] = useState<Message[]>([]);
   const [profiles, setProfiles] = useState<Record<string, Profile>>({});
   const [newMessage, setNewMessage] = useState('');
@@ -43,17 +46,21 @@ export default function MessagesPage() {
     }
 
     try {
-      const { data, error } = await supabase
-        .from('messages')
-        .select('*')
-        .eq('workspace_id', workspace.id)
-        .order('created_at', { ascending: true });
-
-      if (error) throw error;
-      setMessages(data as Message[]);
+      const data = await fetchWithCache(
+        supabase
+          .from('messages')
+          .select('*')
+          .eq('workspace_id', workspace.id)
+          .order('created_at', { ascending: true }),
+        { cacheKey: `messages_${workspace.id}`, ttl: 60000 }
+      );
+      setMessages(data ? (data as Message[]) : []);
     } catch (error) {
       console.error('Failed to load messages:', error);
-      toast.error('Failed to load messages');
+      if (isOnline) {
+        toast.error('Failed to load messages');
+      }
+      setMessages([]);
     } finally {
       setLoading(false);
     }
@@ -120,6 +127,12 @@ export default function MessagesPage() {
       supabase.removeChannel(channel);
     };
   }, [workspace?.id]);
+
+  useOnReconnect(async () => {
+    if (workspace?.id) {
+      await fetchMessages();
+    }
+  });
 
   useEffect(() => {
     // Scroll to bottom when messages change

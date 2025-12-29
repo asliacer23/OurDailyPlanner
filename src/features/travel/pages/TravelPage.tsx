@@ -11,6 +11,8 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { supabase } from '@/integrations/supabase/client';
 import { useAuth } from '@/features/auth/hooks/useAuth';
 import { useEditRequests } from '@/hooks/useEditRequests';
+import { useOnlineStatus, useOnReconnect } from '@/hooks/useOnlineStatus';
+import { fetchWithCache, subscribeToTable } from '@/lib/cacheAndSync';
 import { EditConfirmationDialog } from '@/components/shared/EditConfirmationDialog';
 import { formatPeso } from '@/lib/currency';
 import { toast } from 'sonner';
@@ -28,6 +30,7 @@ interface TravelPlan {
   status: string;
   notes: string | null;
   visibility: 'private' | 'shared' | 'business';
+  workspace_id: string;
   author_id: string;
   created_at: string;
   author?: { id: string; display_name: string | null; avatar_url: string | null };
@@ -35,6 +38,7 @@ interface TravelPlan {
 
 export default function TravelPage() {
   const { user, workspace } = useAuth();
+  const { isOnline } = useOnlineStatus();
   const { pendingEdits, requestEdit, approveEdit, rejectEdit } = useEditRequests(workspace?.id || null);
   const [plans, setPlans] = useState<TravelPlan[]>([]);
   const [loading, setLoading] = useState(true);
@@ -63,24 +67,61 @@ export default function TravelPage() {
   const fetchPlans = async () => {
     if (!workspace?.id) return;
     try {
-      const { data, error } = await supabase
+      const query = supabase
         .from('travel_plans')
         .select('*, author:profiles!travel_plans_author_id_fkey(id, display_name, avatar_url)')
         .eq('workspace_id', workspace.id)
         .order('start_date', { ascending: true });
 
-      if (error) throw error;
-      setPlans(data as TravelPlan[]);
+      const data = await fetchWithCache(query, { cacheKey: `travel_plans_${workspace.id}`, ttl: 3600000 });
+      if (data) {
+        setPlans(data as TravelPlan[]);
+      } else if (isOnline) {
+        toast.error('Failed to load travel plans');
+      }
     } catch (error) {
-      toast.error('Failed to load travel plans');
+      if (isOnline) toast.error('Failed to load travel plans');
     } finally {
       setLoading(false);
     }
   };
 
   useEffect(() => {
-    fetchPlans();
-  }, [workspace?.id]);
+    if (workspace?.id) {
+      fetchPlans();
+
+      // Real-time subscription
+      const unsubscribe = subscribeToTable<TravelPlan>(
+        'travel_plans',
+        (updated) => {
+          if (updated.workspace_id === workspace.id) {
+            setPlans((prev) =>
+              prev.map((p) => (p.id === updated.id ? updated : p))
+            );
+          }
+        },
+        (newPlan) => {
+          if (newPlan.workspace_id === workspace.id) {
+            setPlans((prev) => [newPlan, ...prev]);
+          }
+        },
+        (deleted) => {
+          if (deleted.workspace_id === workspace.id) {
+            setPlans((prev) => prev.filter((p) => p.id !== deleted.id));
+          }
+        },
+        `workspace_id=eq.${workspace.id}`
+      );
+
+      return unsubscribe;
+    }
+  }, [workspace?.id, isOnline]);
+
+  useOnReconnect(async () => {
+    if (workspace?.id) {
+      await fetchPlans();
+    }
+  });
 
   const handleCreate = async () => {
     if (!user?.id || !workspace?.id || !newPlan.destination || !newPlan.start_date) {
@@ -377,7 +418,7 @@ export default function TravelPage() {
               onApprove={async (editId) => {
                 await approveEdit(editId);
                 setShowPendingEdit(false);
-                fetchTravelPlans();
+                fetchPlans();
               }}
               onReject={async (editId) => {
                 await rejectEdit(editId);
